@@ -17,7 +17,7 @@ const DEFAULTS = {
 };
 
 function loadConfig() {
-  const configPath = path.join(__dirname, 'i3x-config.json');
+  const configPath = path.join(__dirname, 'config.json');
   let fileConfig = {};
   if (fs.existsSync(configPath)) {
     try {
