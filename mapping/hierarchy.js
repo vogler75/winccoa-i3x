@@ -145,23 +145,29 @@ async function buildCache() {
   const instances = [];
   const dpeMap = new Map();
 
-  const hierarchyView = config.cns.hierarchyView;
-  const systemName = winccoa.getSystemName();
-  const viewPath = `${systemName}.${hierarchyView}`;
+  const hierarchyViewsRaw = config.cns.hierarchyViews || config.cns.hierarchyView || 'I3X_Hierarchy';
+  const hierarchyViews = Array.isArray(hierarchyViewsRaw) ? hierarchyViewsRaw : [hierarchyViewsRaw];
+  const systemName = winccoa.getSystemName().replace(/:$/, '');  // strip trailing colon
 
-  let trees = [];
-  try {
-    trees = winccoa.cnsGetTrees(viewPath) || [];
-  } catch (err) {
-    console.warn(`Could not read CNS hierarchy view "${hierarchyView}":`, String(err));
+  let anyTrees = false;
+  for (const viewName of hierarchyViews) {
+    const viewPath = `${systemName}.${viewName}:`;  // correct format: "System1.I3X_Hierarchy:"
+    let trees = [];
+    try {
+      trees = winccoa.cnsGetTrees(viewPath) || [];
+    } catch (err) {
+      console.warn(`Could not read CNS hierarchy view "${viewName}":`, String(err));
+    }
+    if (trees.length > 0) {
+      anyTrees = true;
+      for (const treePath of trees) {
+        await traverseCnsNode(treePath, '/', '', instances, dpeMap);
+      }
+    }
   }
 
-  if (trees.length > 0) {
-    for (const treePath of trees) {
-      await traverseCnsNode(treePath, '/', '', instances, dpeMap);
-    }
-  } else {
-    console.info(`CNS hierarchy view "${hierarchyView}" is empty or unavailable — falling back to dpNames enumeration`);
+  if (!anyTrees) {
+    console.info('No CNS hierarchy views found — falling back to dpNames enumeration');
     buildInstancesFromDpNames(instances, dpeMap);
   }
 
@@ -193,7 +199,6 @@ function buildInstancesFromDpNames(instances, dpeMap) {
     if (typeName.startsWith('_')) continue;
     if (PRIMITIVE_TYPE_NAMES.has(typeName)) continue;
 
-    const nsUri = typeNameToUri(typeName);
     let dpList = [];
     try {
       dpList = winccoa.dpNames('*', typeName) || [];
@@ -201,32 +206,46 @@ function buildInstancesFromDpNames(instances, dpeMap) {
       console.warn(`dpNames failed for type "${typeName}":`, String(err));
       continue;
     }
-
-    const typeNode = winccoa.dpTypeGet(typeName, true);
     const shouldExpand = dpList.length <= MAX_EXPAND_INSTANCES;
-
     if (!shouldExpand) {
       console.info(`Type "${typeName}" has ${dpList.length} instances — skipping child expansion`);
     }
-
     for (const dpName of dpList) {
       const localName = stripSystemPrefix(dpName);
-      // Skip internal WinCC OA datapoints (names starting with "_")
       if (localName.startsWith('_')) continue;
-      const elemId = localName;
+      addDpInstance(localName, localName, '/', dpName, typeName, shouldExpand, instances, dpeMap);
+    }
+  }
+}
 
-      instances.push({
-        elementId: elemId,
-        displayName: localName,
-        typeId: typeName,
-        parentId: '/',
-        isComposition: true,
-        namespaceUri: nsUri,
-      });
+/**
+ * Walk a dpTypeGet node tree to find the sub-node at `segments` path.
+ */
+function findTypeNode(node, segments) {
+  if (!node || !segments.length) return node;
+  const [head, ...tail] = segments;
+  const child = (node.children || []).find(c => c.name === head);
+  return tail.length ? findTypeNode(child, tail) : child;
+}
 
-      if (shouldExpand && typeNode && typeNode.children && typeNode.children.length > 0) {
-        expandDpChildren(typeNode.children, elemId, elemId, dpName, nsUri, instances, dpeMap, '');
-      }
+/**
+ * Process a single DP root: push instance + expand type children.
+ * Shared between CNS traversal and dpNames fallback.
+ */
+function addDpInstance(elementId, displayName, parentId, dpName, typeName, shouldExpand, instances, dpeMap) {
+  const nsUri = typeNameToUri(typeName);
+  instances.push({
+    elementId,
+    displayName,
+    typeId: typeName,
+    parentId,
+    isComposition: true,
+    namespaceUri: nsUri,
+  });
+  if (shouldExpand) {
+    const typeNode = winccoa.dpTypeGet(typeName, true);
+    if (typeNode && typeNode.children && typeNode.children.length > 0) {
+      expandDpChildren(typeNode.children, elementId, elementId, dpName, nsUri, instances, dpeMap, '');
     }
   }
 }
@@ -241,14 +260,17 @@ function buildInstancesFromDpNames(instances, dpeMap) {
  * @param {Map}    dpeMap
  */
 async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances, dpeMap) {
+  // ── Step 1: Extract node name ──────────────────────────────────────────
+  // CNS child paths use '.' as separator (e.g. "System1.I3X_Hierarchy:Plant1.pumpe1a")
   const colonIdx = fullCnsPath.lastIndexOf(':');
   const pathAfterColon = colonIdx >= 0 ? fullCnsPath.slice(colonIdx + 1) : fullCnsPath;
-  const slashIdx = pathAfterColon.lastIndexOf('/');
-  const nodeName = slashIdx >= 0 ? pathAfterColon.slice(slashIdx + 1) : pathAfterColon;
+  const sepIdx = Math.max(pathAfterColon.lastIndexOf('/'), pathAfterColon.lastIndexOf('.'));
+  const nodeName = sepIdx >= 0 ? pathAfterColon.slice(sepIdx + 1) : pathAfterColon;
 
   const cnsPath = cnsRelPath ? `${cnsRelPath}/${nodeName}` : nodeName;
-  const myElemId = cnsPath;   // plain path — no obj: prefix
+  const myElemId = cnsPath;
 
+  // ── Step 2: Query linked DP/DPE from CNS node ─────────────────────────
   let dpData = null;
   try {
     const rows = await winccoa.dpQuery(
@@ -260,69 +282,88 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
         dpData = val.trim();
       }
     }
-  } catch (_e) {
-    // Node has no linked DP — treat as folder
-  }
+  } catch (_e) { /* no linked DP */ }
 
-  let isFolder = !dpData;
-  let nsUri = getSystemUri();
+  console.info(`[CNS] "${myElemId}" dpData=${dpData || '(none)'}`);
 
-  if (!isFolder) {
+  // ── Step 3: Dispatch by node type ──────────────────────────────────────
+  let isFolder = true;
+
+  if (dpData) {
     const dpName = dpData.endsWith('.') ? dpData.slice(0, -1) : dpData;
     const localDpName = stripSystemPrefix(dpName);
-    // Skip internal WinCC OA datapoints (names starting with "_")
-    if (localDpName.startsWith('_')) {
-      isFolder = true;
-    }
-  }
 
-  if (!isFolder) {
-    const dpName = dpData.endsWith('.') ? dpData.slice(0, -1) : dpData;
-    let dpTypeName = null;
-    try {
-      dpTypeName = winccoa.dpTypeName(`${dpName}.`);
-    } catch (_e) { /* dp may not exist */ }
+    if (!localDpName.startsWith('_')) {
+      // Determine DP root vs DPE: strip only "System1:" colon-prefix,
+      // keep element path intact. (stripSystemPrefix strips element path too!)
+      const colonPos = dpName.indexOf(':');
+      const nameAfterColon = colonPos >= 0 ? dpName.slice(colonPos + 1) : dpName;
+      const dotIdx = nameAfterColon.indexOf('.');
 
-    if (dpTypeName && !dpTypeName.startsWith('_')) {
-      nsUri = typeNameToUri(dpTypeName);
+      if (dotIdx === -1) {
+        // ── DP ROOT ("pumpe1a") ──────────────────────────────────────
+        // Same as buildInstancesFromDpNames — call shared addDpInstance()
+        let typeName = null;
+        try { typeName = winccoa.dpTypeName(`${dpName}.`); } catch (_e) {}
 
-      instances.push({
-        elementId: myElemId,
-        displayName: nodeName,
-        typeId: dpTypeName,         // plain type name e.g. "PumpType"
-        parentId: parentElemId,
-        isComposition: true,
-        namespaceUri: nsUri,
-      });
+        if (typeName && !typeName.startsWith('_')) {
+          addDpInstance(myElemId, nodeName, parentElemId, dpName, typeName, true, instances, dpeMap);
+          isFolder = false;
+        }
 
-      const typeNode = winccoa.dpTypeGet(dpTypeName, true);
-      if (typeNode && typeNode.children && typeNode.children.length > 0) {
-        expandDpChildren(typeNode.children, myElemId, myElemId, dpName, nsUri, instances, dpeMap, '');
+      } else {
+        // ── DPE PATH ("pumpe1a.speed" or "pumpe1a.config.maxSpeed") ──
+        const dpRootLocal = nameAfterColon.slice(0, dotIdx);
+        const dpRoot = colonPos >= 0
+          ? `${dpName.slice(0, colonPos + 1)}${dpRootLocal}`
+          : dpRootLocal;
+        const elemPath = nameAfterColon.slice(dotIdx + 1);
+
+        let typeName = null;
+        try { typeName = winccoa.dpTypeName(`${dpRoot}.`); } catch (_e) {}
+
+        if (typeName && !typeName.startsWith('_')) {
+          const nsUri = typeNameToUri(typeName);
+          const typeNode = winccoa.dpTypeGet(typeName, true);
+          const subNode = findTypeNode(typeNode, elemPath.split('.'));
+
+          if (subNode && subNode.children && subNode.children.length > 0) {
+            // Struct sub-node → expand its children
+            instances.push({
+              elementId: myElemId, displayName: nodeName, typeId: 'object',
+              parentId: parentElemId, isComposition: true, namespaceUri: nsUri,
+            });
+            expandDpChildren(subNode.children, myElemId, myElemId, dpRoot, nsUri, instances, dpeMap, elemPath);
+          } else {
+            // Leaf DPE → add to dpeMap for value access
+            const typeId = subNode ? elemTypeName(subNode.type) : 'unknown';
+            instances.push({
+              elementId: myElemId, displayName: nodeName, typeId,
+              parentId: parentElemId, isComposition: false, namespaceUri: nsUri,
+            });
+            dpeMap.set(myElemId, dpName);
+          }
+          isFolder = false;
+        }
       }
-    } else {
-      console.warn('Unknown DP type for CNS data:', dpData, '— treating as folder');
-      isFolder = true;
     }
   }
 
+  // ── FOLDER: no DP link, or link could not be resolved ──────────────────
   if (isFolder) {
     instances.push({
-      elementId: myElemId,
-      displayName: nodeName,
-      typeId: 'FolderType',         // plain name
-      parentId: parentElemId,
-      isComposition: true,
-      namespaceUri: nsUri,
+      elementId: myElemId, displayName: nodeName, typeId: 'FolderType',
+      parentId: parentElemId, isComposition: true, namespaceUri: getSystemUri(),
     });
-  }
-
-  let children = [];
-  try {
-    children = winccoa.cnsGetChildren(fullCnsPath) || [];
-  } catch (_e) { /* leaf node */ }
-
-  for (const childPath of children) {
-    await traverseCnsNode(childPath, myElemId, cnsPath, instances, dpeMap);
+    // Only recurse CNS children for folder nodes.
+    // DP-linked nodes get their children from expandDpChildren instead.
+    let children = [];
+    try {
+      children = winccoa.cnsGetChildren(fullCnsPath) || [];
+    } catch (_e) { /* leaf CNS node */ }
+    for (const childPath of children) {
+      await traverseCnsNode(childPath, myElemId, cnsPath, instances, dpeMap);
+    }
   }
 }
 

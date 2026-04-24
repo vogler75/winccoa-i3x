@@ -6,6 +6,13 @@ const { dpTypeNodeToSchema } = require('../utils/json-schema');
 
 const winccoa = new WinccoaManager();
 
+const FOLDER_TYPE = {
+  elementId: 'FolderType',
+  displayName: 'FolderType',
+  namespaceUri: 'http://winccoa.local/FolderType',
+  schema: { type: 'object', properties: {} },
+};
+
 /**
  * Build the list of i3X ObjectType objects from WinCC OA DP types.
  *
@@ -39,6 +46,10 @@ async function buildObjectTypeList(filter) {
     });
   }
 
+  if (!filter || !filter.namespaceUri || filter.namespaceUri === FOLDER_TYPE.namespaceUri) {
+    result.unshift(FOLDER_TYPE);
+  }
+
   return result;
 }
 
@@ -50,6 +61,10 @@ async function buildObjectTypeList(filter) {
 async function getObjectTypesByIds(elementIds) {
   const result = [];
   for (const typeName of elementIds) {
+    if (typeName === 'FolderType') {
+      result.push(FOLDER_TYPE);
+      continue;
+    }
     if (typeName.startsWith('_')) continue;
 
     const typeNode = winccoa.dpTypeGet(typeName, true);

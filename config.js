@@ -10,7 +10,7 @@ const DEFAULTS = {
   auth: { enabled: true },
   cns: {
     namespaceView: 'I3X_Namespaces',
-    hierarchyView: 'I3X_Hierarchy',
+    hierarchyViews: ['I3X_Hierarchy'],
   },
   defaultNamespaceUri: 'http://winccoa.local/default',
   cors: { enabled: true, origin: '*' },
