@@ -63,7 +63,7 @@ npm start
 The server listens on `0.0.0.0:8080` by default and exposes the API under:
 
 ```text
-/i3x/v0
+/i3x/v1
 ```
 
 ## Configuration
@@ -74,7 +74,7 @@ Configuration is loaded from [config.json](config.json). Missing values fall bac
 {
   "host": "0.0.0.0",
   "port": 8080,
-  "basePath": "/i3x/v0",
+  "basePath": "/i3x/v1",
   "auth": {
     "enabled": true
   },
@@ -126,90 +126,108 @@ Values:
 - Current values are read from `_online.._value`, `_online.._stime`, and `_online.._invalid`.
 - History is read from `_offline.._value` using `dpGetPeriod`.
 
+## Response Envelope
+
+Every response follows one of three shapes (i3X v1):
+
+- Single result: `{ "success": true, "result": <value> }`
+- Bulk result:   `{ "success": true, "results": [ { "success": true, "elementId": "…", "result": <value>, "error": null }, … ] }`
+- Error:         `{ "success": false, "error": { "code": <http-status>, "message": "…" } }`
+
 ## API Endpoints
 
-All paths below are relative to `/i3x/v0`.
+All paths below are relative to `/i3x/v1`.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Health check |
-| `GET` | `/namespaces` | List namespaces |
-| `GET` | `/objecttypes` | List object types |
-| `POST` | `/objecttypes/query` | Query object types by `elementIds` |
-| `GET` | `/relationshiptypes` | List relationship types |
-| `POST` | `/relationshiptypes/query` | Query relationship types by `elementIds` |
-| `GET` | `/objects` | List objects; supports `typeId` and `parentId` query filters |
-| `POST` | `/objects/list` | Query objects by `elementIds` |
+| `GET`  | `/info` | Server info + capabilities (unauthenticated) |
+| `GET`  | `/health` | Health check (unauthenticated) |
+| `GET`  | `/namespaces` | List namespaces |
+| `GET`  | `/objecttypes` | List object types |
+| `POST` | `/objecttypes/query` | Bulk fetch object types by `elementIds` |
+| `GET`  | `/relationshiptypes` | List relationship types |
+| `POST` | `/relationshiptypes/query` | Bulk fetch relationship types by `elementIds` |
+| `GET`  | `/objects` | List objects; supports `typeElementId`, `parentId`, `root`, `includeMetadata` query filters |
+| `POST` | `/objects/list` | Bulk fetch objects by `elementIds` |
 | `POST` | `/objects/related` | Query parent/child/component relationships |
-| `POST` | `/objects/value` | Read current values |
-| `PUT` | `/objects/:elementId/value` | Write one current value |
-| `POST` | `/objects/history` | Read historical values |
-| `PUT` | `/objects/:elementId/history` | Write historical values |
-| `GET` | `/subscriptions` | List subscriptions |
+| `POST` | `/objects/value` | Bulk read current values |
+| `PUT`  | `/objects/:elementId/value` | Write one current value (body is the raw JSON value) |
+| `POST` | `/objects/history` | Bulk read historical values |
+| `GET`  | `/objects/:elementId/history` | Read history for one element |
+| `PUT`  | `/objects/:elementId/history` | Write historical values |
 | `POST` | `/subscriptions` | Create subscription |
-| `GET` | `/subscriptions/:id` | Get subscription metadata |
-| `DELETE` | `/subscriptions/:id` | Delete subscription |
-| `POST` | `/subscriptions/:id/register` | Register monitored element IDs |
-| `POST` | `/subscriptions/:id/unregister` | Unregister monitored element IDs |
-| `GET` | `/subscriptions/:id/stream` | Open SSE stream |
-| `POST` | `/subscriptions/:id/sync` | Poll queued subscription updates |
+| `POST` | `/subscriptions/register` | Register monitored element IDs on a subscription |
+| `POST` | `/subscriptions/unregister` | Unregister monitored element IDs |
+| `POST` | `/subscriptions/stream` | Open SSE stream (POST carries `{subscriptionId}`) |
+| `POST` | `/subscriptions/sync` | Poll queued updates; body `{subscriptionId, lastSequenceNumber?}` |
+| `POST` | `/subscriptions/list` | Bulk fetch subscription details |
+| `POST` | `/subscriptions/delete` | Bulk delete subscriptions |
 
 ## Examples
 
 Use Basic Auth when `auth.enabled` is true:
 
 ```bash
-curl -u admin:password http://localhost:8080/i3x/v0/health
-curl -u admin:password http://localhost:8080/i3x/v0/namespaces
-curl -u admin:password http://localhost:8080/i3x/v0/objecttypes
-curl -u admin:password http://localhost:8080/i3x/v0/objects
+curl http://localhost:8080/i3x/v1/info
+curl -u admin:password http://localhost:8080/i3x/v1/namespaces
+curl -u admin:password http://localhost:8080/i3x/v1/objecttypes
+curl -u admin:password http://localhost:8080/i3x/v1/objects
 ```
 
 Read current values:
 
 ```bash
-curl -X POST http://localhost:8080/i3x/v0/objects/value \
+curl -X POST http://localhost:8080/i3x/v1/objects/value \
   -u admin:password \
   -H 'Content-Type: application/json' \
   -d '{"elementIds":["Plant1/Area1/Motor1/speed"],"maxDepth":1}'
 ```
 
-Write a current value. Slash-containing element IDs must be URL-encoded:
+Write a current value. The request body is the raw JSON value itself, and slash-containing element IDs must be URL-encoded:
 
 ```bash
-curl -X PUT http://localhost:8080/i3x/v0/objects/Plant1%2FArea1%2FMotor1%2Fspeed/value \
+curl -X PUT http://localhost:8080/i3x/v1/objects/Plant1%2FArea1%2FMotor1%2Fspeed/value \
   -u admin:password \
   -H 'Content-Type: application/json' \
-  -d '{"value":42}'
+  -d '42'
 ```
 
 Read history:
 
 ```bash
-curl -X POST http://localhost:8080/i3x/v0/objects/history \
+curl -X POST http://localhost:8080/i3x/v1/objects/history \
   -u admin:password \
   -H 'Content-Type: application/json' \
   -d '{
     "elementIds": ["Plant1/Area1/Motor1/speed"],
     "startTime": "2026-04-24T00:00:00.000Z",
-    "endTime": "2026-04-24T12:00:00.000Z",
+    "endTime":   "2026-04-24T12:00:00.000Z",
     "maxValues": 1000
   }'
 ```
 
-Create and stream a subscription:
+Create, register, and stream a subscription:
 
 ```bash
-SUB=$(curl -s -X POST http://localhost:8080/i3x/v0/subscriptions \
-  -u admin:password | node -e "process.stdin.resume();process.stdin.setEncoding('utf8');let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).subscriptionId))")
+SUB=$(curl -s -X POST http://localhost:8080/i3x/v1/subscriptions \
+  -u admin:password -H 'Content-Type: application/json' -d '{}' \
+  | jq -r '.result.subscriptionId')
 
-curl -X POST "http://localhost:8080/i3x/v0/subscriptions/$SUB/register" \
-  -u admin:password \
-  -H 'Content-Type: application/json' \
-  -d '{"elementIds":["Plant1/Area1/Motor1/speed"],"maxDepth":1}'
+curl -X POST http://localhost:8080/i3x/v1/subscriptions/register \
+  -u admin:password -H 'Content-Type: application/json' \
+  -d "{\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
 
-curl -N "http://localhost:8080/i3x/v0/subscriptions/$SUB/stream" \
-  -u admin:password
+curl -N -X POST http://localhost:8080/i3x/v1/subscriptions/stream \
+  -u admin:password -H 'Content-Type: application/json' \
+  -d "{\"subscriptionId\":\"$SUB\"}"
+```
+
+Poll with sequence-number ack instead of streaming:
+
+```bash
+curl -X POST http://localhost:8080/i3x/v1/subscriptions/sync \
+  -u admin:password -H 'Content-Type: application/json' \
+  -d "{\"subscriptionId\":\"$SUB\",\"lastSequenceNumber\":0}"
 ```
 
 ## Project Structure

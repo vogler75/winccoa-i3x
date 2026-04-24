@@ -21,7 +21,7 @@ let _cache = null;
 
 /**
  * Return all i3X ObjectInstance objects, optionally filtered.
- * @param {{ parentId?: string, typeId?: string }} [filter]
+ * @param {{ parentId?: string, typeElementId?: string, root?: boolean }} [filter]
  */
 async function buildObjectInstanceList(filter) {
   const cache = await getCache();
@@ -31,8 +31,11 @@ async function buildObjectInstanceList(filter) {
     if (filter.parentId !== undefined) {
       result = result.filter(obj => obj.parentId === filter.parentId);
     }
-    if (filter.typeId !== undefined) {
-      result = result.filter(obj => obj.typeId === filter.typeId);
+    if (filter.typeElementId !== undefined) {
+      result = result.filter(obj => obj.typeElementId === filter.typeElementId);
+    }
+    if (filter.root === true) {
+      result = result.filter(obj => obj.parentId === '/' || obj.parentId === null || obj.parentId === undefined);
     }
   }
 
@@ -108,6 +111,46 @@ async function getRelatedObjects(elementIds, relationshipType) {
 async function elementIdToDpe(elementId) {
   const cache = await getCache();
   return cache.dpeMap.get(elementId) || null;
+}
+
+/**
+ * Collect all leaf DPE descendants of a single elementId, walking at most
+ * `maxDepth - 1` levels deep. `maxDepth === 0` means unlimited.
+ *
+ * Returns [{ elementId, relPath, dpe }] where relPath is the slash-joined
+ * path from the root to the leaf. Composition nodes themselves are never
+ * returned — only leaves that have a DPE mapping.
+ *
+ * @param {string} rootElementId
+ * @param {number} maxDepth  0 = unlimited, 1 = no recursion (empty), N>1 = up to N-1 levels down
+ * @returns {Promise<Array<{elementId: string, relPath: string, dpe: string}>>}
+ */
+async function collectLeafDescendants(rootElementId, maxDepth) {
+  if (maxDepth === 1) return [];
+
+  const cache = await getCache();
+  const budget = maxDepth === 0 ? Infinity : maxDepth - 1;
+  const out = [];
+
+  function walk(parentEid, depthLeft) {
+    if (depthLeft <= 0) return;
+    const children = cache.instances.filter(o => o.parentId === parentEid);
+    for (const c of children) {
+      if (c.isComposition) {
+        walk(c.elementId, depthLeft - 1);
+      } else {
+        const dpe = cache.dpeMap.get(c.elementId);
+        if (!dpe) continue;
+        const relPath = c.elementId.startsWith(rootElementId + '/')
+          ? c.elementId.slice(rootElementId.length + 1)
+          : c.elementId;
+        out.push({ elementId: c.elementId, relPath, dpe });
+      }
+    }
+  }
+
+  walk(rootElementId, budget);
+  return out;
 }
 
 /**
@@ -264,7 +307,7 @@ function addDpInstance(elementId, displayName, parentId, dpName, typeName, shoul
   instances.push({
     elementId,
     displayName,
-    typeId: typeName,
+    typeElementId: typeName,
     parentId,
     isComposition: true,
     namespaceUri: nsUri,
@@ -357,15 +400,15 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
           if (subNode && subNode.children && subNode.children.length > 0) {
             // Struct sub-node → expand its children
             instances.push({
-              elementId: myElemId, displayName: nodeName, typeId: 'object',
+              elementId: myElemId, displayName: nodeName, typeElementId: 'object',
               parentId: parentElemId, isComposition: true, namespaceUri: nsUri,
             });
             expandDpChildren(subNode.children, myElemId, myElemId, dpRoot, nsUri, instances, dpeMap, elemPath);
           } else {
             // Leaf DPE → add to dpeMap for value access
-            const typeId = subNode ? elemTypeName(subNode.type) : 'unknown';
+            const leafType = subNode ? elemTypeName(subNode.type) : 'unknown';
             instances.push({
-              elementId: myElemId, displayName: nodeName, typeId,
+              elementId: myElemId, displayName: nodeName, typeElementId: leafType,
               parentId: parentElemId, isComposition: false, namespaceUri: nsUri,
             });
             dpeMap.set(myElemId, dpName);
@@ -379,7 +422,7 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
   // ── FOLDER: no DP link, or link could not be resolved ──────────────────
   if (isFolder) {
     instances.push({
-      elementId: myElemId, displayName: nodeName, typeId: 'FolderType',
+      elementId: myElemId, displayName: nodeName, typeElementId: 'FolderType',
       parentId: parentElemId, isComposition: true, namespaceUri: getSystemUri(),
     });
     // Only recurse CNS children for folder nodes.
@@ -420,7 +463,7 @@ function expandDpChildren(children, parentElemId, baseCnsPath, dpName, nsUri, in
       instances.push({
         elementId: childElemId,
         displayName: child.name,
-        typeId: child.type === ET.Struct ? 'object' : elemTypeName(child.type),
+        typeElementId: child.type === ET.Struct ? 'object' : elemTypeName(child.type),
         parentId: parentElemId,
         isComposition: true,
         namespaceUri: nsUri,
@@ -431,7 +474,7 @@ function expandDpChildren(children, parentElemId, baseCnsPath, dpName, nsUri, in
       instances.push({
         elementId: childElemId,
         displayName: child.name,
-        typeId: elemTypeName(child.type),
+        typeElementId: elemTypeName(child.type),
         parentId: parentElemId,
         isComposition: false,
         namespaceUri: nsUri,
@@ -447,5 +490,6 @@ module.exports = {
   getRelatedObjects,
   elementIdToDpe,
   resolveLeafIds,
+  collectLeafDescendants,
   invalidateCache,
 };

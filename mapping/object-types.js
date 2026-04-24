@@ -10,11 +10,14 @@ const FOLDER_TYPE = {
   elementId: 'FolderType',
   displayName: 'FolderType',
   namespaceUri: 'http://winccoa.local/FolderType',
+  sourceTypeId: 'FolderType',
   schema: { type: 'object', properties: {} },
 };
 
 /**
  * Build the list of i3X ObjectType objects from WinCC OA DP types.
+ * Shape per i3X v1 spec:
+ *   { elementId, displayName, namespaceUri, sourceTypeId, schema, version?, related? }
  *
  * @param {{ namespaceUri?: string }} [filter]
  * @returns {Array<object>}
@@ -39,9 +42,10 @@ async function buildObjectTypeList(filter) {
     }
 
     result.push({
-      elementId: typeName,          // plain name per spec e.g. "PumpType"
+      elementId: typeName,
       displayName: typeName,
       namespaceUri: nsUri,
+      sourceTypeId: typeName,
       schema: dpTypeNodeToSchema(typeNode),
     });
   }
@@ -55,29 +59,27 @@ async function buildObjectTypeList(filter) {
 
 /**
  * Get specific ObjectTypes by elementId array.
- * @param {string[]} elementIds  plain type names e.g. ["PumpType"]
- * @returns {Array<object>}
+ * Returns one entry per requested id; null entries for unknown ids so the
+ * caller can build a per-item bulk response.
+ * @param {string[]} elementIds
+ * @returns {Array<object|null>} same length as elementIds
  */
 async function getObjectTypesByIds(elementIds) {
-  const result = [];
-  for (const typeName of elementIds) {
-    if (typeName === 'FolderType') {
-      result.push(FOLDER_TYPE);
-      continue;
-    }
-    if (typeName.startsWith('_')) continue;
+  return elementIds.map(typeName => {
+    if (typeName === 'FolderType') return FOLDER_TYPE;
+    if (typeName.startsWith('_')) return null;
 
     const typeNode = winccoa.dpTypeGet(typeName, true);
-    if (!typeNode) continue;
+    if (!typeNode) return null;
 
-    result.push({
+    return {
       elementId: typeName,
       displayName: typeName,
       namespaceUri: typeNameToUri(typeName),
+      sourceTypeId: typeName,
       schema: dpTypeNodeToSchema(typeNode),
-    });
-  }
-  return result;
+    };
+  });
 }
 
 module.exports = { buildObjectTypeList, getObjectTypesByIds };

@@ -6,6 +6,7 @@ const config = require('./config');
 const { basicAuth } = require('./auth');
 const { version } = require('./package.json');
 
+const infoRouter = require('./routes/info');
 const namespacesRouter = require('./routes/namespaces');
 const objectTypesRouter = require('./routes/object-types');
 const relationshipTypesRouter = require('./routes/relationship-types');
@@ -25,16 +26,16 @@ function createApp() {
   // Body parsing
   app.use(express.json());
 
-  // Auth
-  app.use(basicAuth);
-
-  // Health check (unauthenticated — before basicAuth would block it, but we
-  // apply auth globally so this is fine — auth.enabled=false for dev)
   const base = config.basePath;
 
+  // Unauthenticated endpoints (must be mounted BEFORE basicAuth)
   app.get(`${base}/health`, (_req, res) => {
     res.json({ status: 'ok', version });
   });
+  app.use(`${base}/info`, infoRouter);
+
+  // Auth for everything below
+  app.use(basicAuth);
 
   // i3X routes
   app.use(`${base}/namespaces`, namespacesRouter);

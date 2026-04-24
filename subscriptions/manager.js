@@ -1,89 +1,63 @@
 'use strict';
 
 /**
- * subscriptions/manager.js
+ * subscriptions/manager.js — i3X v1 subscription store.
  *
- * In-memory subscription store.
  * Each subscription has:
  *   - id (UUID)
+ *   - clientId       — caller-provided, echoed on responses
+ *   - displayName    — caller-provided, optional
  *   - created (Date)
  *   - monitoredItems: Map<elementId, { dpeName, connectId, maxDepth }>
- *   - valueQueue: Array<SyncItem>  — for poll-based sync
- *   - sseClients: Set<Response>    — active SSE connections
+ *   - updateQueue:   Array<SyncUpdate>   — queued for /sync, bounded to MAX_QUEUE_SIZE
+ *   - nextSequence:  number              — monotonic per-subscription counter
+ *   - sseClients:    Set<Response>
  */
 
 const { randomUUID } = require('crypto');
 
-// Cap the /sync queue so a subscription that is never polled cannot grow
-// the process memory without bound. Oldest entries are dropped first.
 const MAX_QUEUE_SIZE = 10_000;
 
 /** @type {Map<string, Subscription>} */
 const _subscriptions = new Map();
 
-/**
- * Create a new empty subscription.
- * @returns {string} subscriptionId
- */
-function createSubscription() {
+function createSubscription({ clientId, displayName } = {}) {
   const id = randomUUID();
   _subscriptions.set(id, {
     id,
+    clientId: clientId || null,
+    displayName: displayName || null,
     created: new Date(),
     monitoredItems: new Map(),
-    valueQueue: [],
+    updateQueue: [],
+    nextSequence: 1,
     sseClients: new Set(),
   });
   return id;
 }
 
-/**
- * Get a subscription by id. Returns null if not found.
- * @param {string} id
- * @returns {object|null}
- */
 function getSubscription(id) {
   return _subscriptions.get(id) || null;
 }
 
-/**
- * List all subscriptions.
- * @returns {object[]}
- */
-function listSubscriptions() {
-  return [..._subscriptions.values()].map(sub => serializeSub(sub));
-}
-
-/**
- * Delete a subscription: disconnect all dpConnects, close SSE clients, remove from store.
- * @param {string} id
- * @param {object} monitor  monitor module (passed to avoid circular deps)
- * @returns {boolean} true if existed
- */
 function deleteSubscription(id, monitor) {
   const sub = _subscriptions.get(id);
   if (!sub) return false;
-
-  // Disconnect all monitored items
   for (const [, item] of sub.monitoredItems) {
     monitor.disconnect(item.connectId);
   }
   sub.monitoredItems.clear();
-
-  // Close all SSE clients
   for (const res of sub.sseClients) {
     try { res.end(); } catch (_e) { /* ignore */ }
   }
   sub.sseClients.clear();
-
   _subscriptions.delete(id);
   return true;
 }
 
 /**
- * Push a value update to a subscription:
- * - Appends to valueQueue
- * - Writes to all active SSE clients
+ * Assign a sequence number to an update, push to SSE streams, and enqueue
+ * for /sync callers.
  *
  * @param {string} id  subscriptionId
  * @param {string} elementId
@@ -93,17 +67,20 @@ function pushUpdate(id, elementId, vqt) {
   const sub = _subscriptions.get(id);
   if (!sub) return;
 
-  const item = { [elementId]: { data: [vqt] } };
+  const update = {
+    sequenceNumber: sub.nextSequence++,
+    elementId,
+    value: vqt.value,
+    quality: vqt.quality,
+    timestamp: vqt.timestamp,
+  };
 
-  // Enqueue for sync, bounded to prevent unbounded memory growth when
-  // /sync is never called (e.g. SSE-only subscriptions).
-  sub.valueQueue.push(item);
-  if (sub.valueQueue.length > MAX_QUEUE_SIZE) {
-    sub.valueQueue.splice(0, sub.valueQueue.length - MAX_QUEUE_SIZE);
+  sub.updateQueue.push(update);
+  if (sub.updateQueue.length > MAX_QUEUE_SIZE) {
+    sub.updateQueue.splice(0, sub.updateQueue.length - MAX_QUEUE_SIZE);
   }
 
-  // Push to SSE streams
-  const payload = `data: ${JSON.stringify([item])}\n\n`;
+  const payload = `data: ${JSON.stringify(update)}\n\n`;
   for (const res of sub.sseClients) {
     try {
       res.write(payload);
@@ -115,22 +92,28 @@ function pushUpdate(id, elementId, vqt) {
 }
 
 /**
- * Drain and return the queued updates for a subscription.
+ * Sync pull with ack:
+ *  - Drops queued updates with sequenceNumber <= lastSequenceNumber.
+ *  - Returns the remaining updates, ordered by sequenceNumber.
+ *
  * @param {string} id
- * @returns {object[]}
+ * @param {number|null|undefined} lastSequenceNumber
+ * @returns {SyncUpdate[] | null}   null if the subscription does not exist
  */
-function drainQueue(id) {
+function syncUpdates(id, lastSequenceNumber) {
   const sub = _subscriptions.get(id);
   if (!sub) return null;
-  const items = sub.valueQueue.splice(0);
-  return items;
+  if (typeof lastSequenceNumber === 'number') {
+    const keepFrom = sub.updateQueue.findIndex(u => u.sequenceNumber > lastSequenceNumber);
+    if (keepFrom === -1) {
+      sub.updateQueue.length = 0;
+    } else if (keepFrom > 0) {
+      sub.updateQueue.splice(0, keepFrom);
+    }
+  }
+  return sub.updateQueue.slice();
 }
 
-/**
- * Add an SSE response object to a subscription's client set.
- * @param {string} id
- * @param {object} res  Express Response
- */
 function addSseClient(id, res) {
   const sub = _subscriptions.get(id);
   if (!sub) return false;
@@ -138,34 +121,35 @@ function addSseClient(id, res) {
   return true;
 }
 
-/**
- * Remove an SSE response from a subscription's client set.
- * @param {string} id
- * @param {object} res
- */
 function removeSseClient(id, res) {
   const sub = _subscriptions.get(id);
   if (!sub) return;
   sub.sseClients.delete(res);
 }
 
-function serializeSub(sub) {
+/**
+ * v1 SubscriptionDetail shape.
+ */
+function serializeDetail(sub) {
+  const monitoredObjects = [];
+  for (const [elementId, item] of sub.monitoredItems) {
+    monitoredObjects.push({ elementId, maxDepth: item.maxDepth });
+  }
   return {
     subscriptionId: sub.id,
-    created: sub.created.toISOString(),
-    monitoredCount: sub.monitoredItems.size,
-    sseClientCount: sub.sseClients.size,
+    clientId: sub.clientId,
+    displayName: sub.displayName,
+    monitoredObjects,
   };
 }
 
 module.exports = {
   createSubscription,
   getSubscription,
-  listSubscriptions,
   deleteSubscription,
   pushUpdate,
-  drainQueue,
+  syncUpdates,
   addSseClient,
   removeSseClient,
-  serializeSub,
+  serializeDetail,
 };

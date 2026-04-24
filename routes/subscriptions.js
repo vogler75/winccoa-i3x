@@ -1,19 +1,15 @@
 'use strict';
 
 /**
- * routes/subscriptions.js
+ * routes/subscriptions.js — i3X v1 subscription routes.
  *
- * Subscription CRUD + SSE stream + sync.
- *
- * Routes:
- *   GET    /subscriptions                     — list all
- *   POST   /subscriptions                     — create
- *   GET    /subscriptions/:id                 — get one
- *   DELETE /subscriptions/:id                 — delete
- *   POST   /subscriptions/:id/register        — add monitored items
- *   POST   /subscriptions/:id/unregister      — remove monitored items
- *   GET    /subscriptions/:id/stream          — SSE event stream
- *   POST   /subscriptions/:id/sync            — poll + clear queue
+ *   POST /subscriptions            create
+ *   POST /subscriptions/register   add monitored items
+ *   POST /subscriptions/unregister remove monitored items
+ *   POST /subscriptions/stream     open SSE stream (POST, body carries subId)
+ *   POST /subscriptions/sync       poll + ack
+ *   POST /subscriptions/list       bulk fetch details
+ *   POST /subscriptions/delete     bulk delete
  */
 
 const express = require('express');
@@ -21,145 +17,147 @@ const manager = require('../subscriptions/manager');
 const monitor = require('../subscriptions/monitor');
 const { setupSse } = require('../subscriptions/sse');
 const { elementIdToDpe, resolveLeafIds } = require('../mapping/hierarchy');
+const { sendSuccess, sendBulk, bulkItem } = require('../utils/response');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
 
-// ── List ──────────────────────────────────────────────────────────────────
-
-router.get('/', (_req, res) => {
-  res.json({ subscriptions: manager.listSubscriptions() });
-});
-
 // ── Create ────────────────────────────────────────────────────────────────
 
-router.post('/', (_req, res) => {
-  const id = manager.createSubscription();
-  res.status(201).json({ subscriptionId: id });
-});
-
-// ── Get one ───────────────────────────────────────────────────────────────
-
-router.get('/:id', (req, res) => {
-  const sub = manager.getSubscription(req.params.id);
-  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
-  res.json(manager.serializeSub(sub));
-});
-
-// ── Delete ────────────────────────────────────────────────────────────────
-
-router.delete('/:id', (req, res) => {
-  const deleted = manager.deleteSubscription(req.params.id, monitor);
-  if (!deleted) return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
-  res.status(204).end();
+router.post('/', (req, res) => {
+  const { clientId, displayName } = req.body || {};
+  const subscriptionId = manager.createSubscription({ clientId, displayName });
+  sendSuccess(res, { clientId: clientId || null, subscriptionId, displayName: displayName || null });
 });
 
 // ── Register monitored items ──────────────────────────────────────────────
 
-/**
- * POST /subscriptions/:id/register
- * Body: { elementIds: string[], maxDepth?: number }
- *
- * Resolves each elementId → DPE (recursively if maxDepth > 1),
- * then calls dpConnect for each leaf DPE.
- */
-router.post('/:id/register', async (req, res) => {
-  const sub = manager.getSubscription(req.params.id);
-  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
-
-  const { elementIds, maxDepth = 1 } = req.body || {};
+router.post('/register', async (req, res) => {
+  const { subscriptionId, elementIds, maxDepth = 1 } = req.body || {};
+  if (!subscriptionId) {
+    return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
+  }
   if (!Array.isArray(elementIds)) {
     return sendError(res, 400, 'Validation error', '"elementIds" array is required');
   }
+  const sub = manager.getSubscription(subscriptionId);
+  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   try {
-    // Expand to leaf DPEs
-    const leafIds = await resolveLeafIds(elementIds, maxDepth);
-
-    const registered = [];
+    const leafIds = await resolveLeafIds(elementIds, maxDepth || 1);
+    const seen = new Set();
     for (const eid of leafIds) {
-      if (sub.monitoredItems.has(eid)) continue;  // already watching
-
+      if (sub.monitoredItems.has(eid)) { seen.add(eid); continue; }
       const dpe = await elementIdToDpe(eid);
-      if (!dpe) {
-        console.warn('register: no DPE for elementId', eid);
-        continue;
-      }
-
-      const connectId = monitor.connect(req.params.id, eid, dpe);
+      if (!dpe) continue;
+      const connectId = monitor.connect(subscriptionId, eid, dpe);
       sub.monitoredItems.set(eid, { dpeName: dpe, connectId, maxDepth });
-      registered.push(eid);
+      seen.add(eid);
     }
-
-    res.json({ registered });
+    const items = elementIds.map(eid => bulkItem({ elementId: eid, subscriptionId }));
+    sendBulk(res, items);
   } catch (exc) {
-    console.error('POST /subscriptions/:id/register failed:', exc);
+    console.error('POST /subscriptions/register failed:', exc);
     sendError(res, 500, 'Internal error', String(exc));
   }
 });
 
-// ── Unregister monitored items ────────────────────────────────────────────
+// ── Unregister ────────────────────────────────────────────────────────────
 
-/**
- * POST /subscriptions/:id/unregister
- * Body: { elementIds: string[] }
- */
-router.post('/:id/unregister', (req, res) => {
-  const sub = manager.getSubscription(req.params.id);
-  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
-
-  const { elementIds } = req.body || {};
+router.post('/unregister', async (req, res) => {
+  const { subscriptionId, elementIds, maxDepth = 1 } = req.body || {};
+  if (!subscriptionId) {
+    return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
+  }
   if (!Array.isArray(elementIds)) {
     return sendError(res, 400, 'Validation error', '"elementIds" array is required');
   }
+  const sub = manager.getSubscription(subscriptionId);
+  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
-  const unregistered = [];
-  for (const eid of elementIds) {
-    const item = sub.monitoredItems.get(eid);
-    if (!item) continue;
-    monitor.disconnect(item.connectId);
-    sub.monitoredItems.delete(eid);
-    unregistered.push(eid);
+  try {
+    const leafIds = await resolveLeafIds(elementIds, maxDepth || 1);
+    for (const eid of leafIds) {
+      const item = sub.monitoredItems.get(eid);
+      if (!item) continue;
+      monitor.disconnect(item.connectId);
+      sub.monitoredItems.delete(eid);
+    }
+    const items = elementIds.map(eid => bulkItem({ elementId: eid, subscriptionId }));
+    sendBulk(res, items);
+  } catch (exc) {
+    console.error('POST /subscriptions/unregister failed:', exc);
+    sendError(res, 500, 'Internal error', String(exc));
   }
-
-  res.json({ unregistered });
 });
 
-// ── SSE stream ────────────────────────────────────────────────────────────
+// ── Stream (SSE over POST) ────────────────────────────────────────────────
 
-/**
- * GET /subscriptions/:id/stream
- * Keeps the connection open and pushes SSE events as DPE values change.
- */
-router.get('/:id/stream', (req, res) => {
-  const sub = manager.getSubscription(req.params.id);
-  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
+router.post('/stream', (req, res) => {
+  const { subscriptionId } = req.body || {};
+  if (!subscriptionId) {
+    return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
+  }
+  const sub = manager.getSubscription(subscriptionId);
+  if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   const heartbeat = setupSse(res);
-  manager.addSseClient(req.params.id, res);
+  manager.addSseClient(subscriptionId, res);
 
-  // Do NOT drain the poll queue here — it belongs to /sync callers.
-  // SSE only receives updates from the moment of connect onward.
-
-  // Clean up when the client disconnects
   req.on('close', () => {
     clearInterval(heartbeat);
-    manager.removeSseClient(req.params.id, res);
+    manager.removeSseClient(subscriptionId, res);
   });
 });
 
-// ── Sync (poll) ───────────────────────────────────────────────────────────
+// ── Sync (poll + ack) ─────────────────────────────────────────────────────
 
-/**
- * POST /subscriptions/:id/sync
- * Returns and clears the queued value updates.
- */
-router.post('/:id/sync', (req, res) => {
-  const items = manager.drainQueue(req.params.id);
-  if (items === null) {
-    return sendError(res, 404, 'Subscription not found', `id=${req.params.id}`);
+router.post('/sync', (req, res) => {
+  const { subscriptionId, lastSequenceNumber } = req.body || {};
+  if (!subscriptionId) {
+    return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
-  res.json({ data: items });
+  const updates = manager.syncUpdates(subscriptionId, lastSequenceNumber);
+  if (updates === null) {
+    return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
+  }
+  sendSuccess(res, updates);
+});
+
+// ── List (bulk) ───────────────────────────────────────────────────────────
+
+router.post('/list', (req, res) => {
+  const { subscriptionIds } = req.body || {};
+  if (!Array.isArray(subscriptionIds)) {
+    return sendError(res, 400, 'Validation error', '"subscriptionIds" array is required');
+  }
+  const items = subscriptionIds.map(subId => {
+    const sub = manager.getSubscription(subId);
+    if (sub) return bulkItem({ subscriptionId: subId, result: manager.serializeDetail(sub) });
+    return bulkItem({
+      subscriptionId: subId,
+      error: { code: 404, message: `Subscription '${subId}' not found` },
+    });
+  });
+  sendBulk(res, items);
+});
+
+// ── Delete (bulk) ─────────────────────────────────────────────────────────
+
+router.post('/delete', (req, res) => {
+  const { subscriptionIds } = req.body || {};
+  if (!Array.isArray(subscriptionIds)) {
+    return sendError(res, 400, 'Validation error', '"subscriptionIds" array is required');
+  }
+  const items = subscriptionIds.map(subId => {
+    const ok = manager.deleteSubscription(subId, monitor);
+    if (ok) return bulkItem({ subscriptionId: subId });
+    return bulkItem({
+      subscriptionId: subId,
+      error: { code: 404, message: `Subscription '${subId}' not found` },
+    });
+  });
+  sendBulk(res, items);
 });
 
 module.exports = router;

@@ -6,7 +6,7 @@ const path = require('path');
 const DEFAULTS = {
   host: '0.0.0.0',
   port: 8080,
-  basePath: '/i3x/v0',
+  basePath: '/i3x/v1',
   auth: { enabled: true },
   cns: {
     namespaceView: 'I3X_Namespaces',

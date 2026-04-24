@@ -38,17 +38,27 @@ There is no test suite or lint tool configured. Verify correctness manually:
 
 ```bash
 # Test API endpoints (server must be running inside WinCC OA):
-curl http://localhost:8080/i3x/v0/namespaces -u admin:password
-curl http://localhost:8080/i3x/v0/objecttypes -u admin:password
-curl http://localhost:8080/i3x/v0/objects -u admin:password
+curl http://localhost:8080/i3x/v1/info                                  # unauthenticated
+curl http://localhost:8080/i3x/v1/namespaces   -u admin:password
+curl http://localhost:8080/i3x/v1/objecttypes  -u admin:password
+curl http://localhost:8080/i3x/v1/objects      -u admin:password
 
-curl -X POST http://localhost:8080/i3x/v0/objects/value \
+curl -X POST http://localhost:8080/i3x/v1/objects/value \
   -u admin:password -H "Content-Type: application/json" \
-  -d '{"elementIds":["obj:Plant1/Area1/Motor1/speed"],"maxDepth":1}'
+  -d '{"elementIds":["Plant1/Area1/Motor1/speed"],"maxDepth":1}'
 
-# SSE subscription test
-SUB=$(curl -s -X POST http://localhost:8080/i3x/v0/subscriptions -u admin:password | node -e "process.stdin.resume();process.stdin.setEncoding('utf8');let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).subscriptionId))")
-curl -N http://localhost:8080/i3x/v0/subscriptions/$SUB/stream -u admin:password
+# Subscription flow: create, register, stream
+SUB=$(curl -s -X POST http://localhost:8080/i3x/v1/subscriptions \
+  -u admin:password -H "Content-Type: application/json" -d '{}' \
+  | jq -r '.result.subscriptionId')
+
+curl -X POST http://localhost:8080/i3x/v1/subscriptions/register \
+  -u admin:password -H "Content-Type: application/json" \
+  -d "{\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
+
+curl -N -X POST http://localhost:8080/i3x/v1/subscriptions/stream \
+  -u admin:password -H "Content-Type: application/json" \
+  -d "{\"subscriptionId\":\"$SUB\"}"
 ```
 
 ---
@@ -58,7 +68,7 @@ curl -N http://localhost:8080/i3x/v0/subscriptions/$SUB/stream -u admin:password
 ```
 winccoa-i3x/
 ├── index.js                   # Manager entry point
-├── config.js                  # Config loading (i3x-config.json)
+├── config.js                  # Config loading (config.json)
 ├── server.js                  # Express app setup
 ├── auth.js                    # Basic Auth middleware
 ├── mapping/
@@ -81,11 +91,12 @@ winccoa-i3x/
 │   ├── monitor.js             # dpConnect-based monitoring
 │   └── sse.js                 # SSE stream handling
 ├── utils/
-│   ├── element-id.js          # elementId encode/decode (obj:, type:, rel:)
+│   ├── element-id.js          # elementId encode/decode
 │   ├── json-schema.js         # WinccoaDpTypeNode → JSON Schema
 │   ├── quality.js             # WinCC OA _online.._invalid → i3X quality
-│   └── errors.js              # HTTP error response formatting
-├── i3x-config.json            # Runtime config (port, auth, CNS view names)
+│   ├── response.js            # i3X v1 envelope helpers (success/bulk/bulkItem)
+│   └── errors.js              # Error response formatting
+├── config.json                # Runtime config (port, auth, CNS view names)
 └── package.json
 ```
 
@@ -249,15 +260,17 @@ function onValueChange(names, values, type, error) {
 
 ## i3X ElementId Conventions
 
+ElementIds are bare strings (no `obj:` / `type:` / `rel:` prefixes) — the i3X v1 spec keys entities by type-tagged endpoints rather than prefixed ids.
+
 | Entity | Format | Example |
 |--------|--------|---------|
-| ObjectType | `type:{DpTypeName}` | `type:MotorType` |
-| ObjectInstance (DP) | `obj:{cnsPath}` | `obj:Plant1/Area1/Motor1` |
-| ObjectInstance (DPE) | `obj:{cnsPath}/{element}` | `obj:Plant1/Area1/Motor1/speed` |
-| RelationshipType | `rel:{name}` | `rel:HasParent` |
+| ObjectType | `{DpTypeName}` | `MotorType` |
+| ObjectInstance (DP) | `{cnsPath}` | `Plant1/Area1/Motor1` |
+| ObjectInstance (DPE) | `{cnsPath}/{element}` | `Plant1/Area1/Motor1/speed` |
+| RelationshipType | `{name}` | `HasParent` |
 | Namespace | `{uri}` | `http://winccoa.local/MotorType` |
 
-Base path: `/i3x/v0` (from `i3x-config.json`). Configuration is loaded from `i3x-config.json` in the project root.
+Base path: `/i3x/v1` (from `config.json`). Configuration is loaded from `config.json` in the project root.
 
 ---
 

@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { buildNamespaceList } = require('../mapping/namespaces');
+const { sendSuccess } = require('../utils/response');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
@@ -10,7 +11,7 @@ const router = express.Router();
 router.get('/', async (_req, res) => {
   try {
     const namespaces = await buildNamespaceList();
-    res.json(namespaces);
+    sendSuccess(res, namespaces);
   } catch (exc) {
     console.error('GET /namespaces failed:', exc);
     sendError(res, 500, 'Internal error', String(exc));
