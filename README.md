@@ -2,6 +2,8 @@
 
 REST API server that exposes WinCC OA datapoints, datapoint types, live values, history, and subscriptions through the CESMII i3X API shape.
 
+This project is a prototype. API behavior, mapping rules, configuration, and startup details may change in future versions.
+
 The server runs as a WinCC OA JavaScript Manager and uses Express.js for HTTP routing. It is plain JavaScript using CommonJS modules; there is no build step.
 
 ## What It Provides
@@ -37,16 +39,25 @@ npm install --save-dev /opt/WinCC_OA/3.21/javascript/@types/winccoa-manager
 
 ## Run
 
+The normal production setup is to add this server to the WinCC OA Console as a Node.js/JavaScript Manager and configure it to run:
+
+```text
+winccoa-i3x/index.js
+```
+
+It can also be started manually through the WinCC OA JavaScript Manager bootstrap. Adapt the WinCC OA version path, project name, `pmonIndex`, and script path for your installation:
+
+```bash
+node "/opt/WinCC_OA/3.21/javascript/winccoa-manager/lib/bootstrap.js" \
+  -PROJ Example \
+  -pmonIndex 8 \
+  winccoa-i3x/index.js
+```
+
 For local syntax/runtime startup checks where `winccoa-manager` is resolvable:
 
 ```bash
 npm start
-```
-
-In production, configure a WinCC OA JavaScript Manager to run:
-
-```text
-winccoa-i3x/index.js
 ```
 
 The server listens on `0.0.0.0:8080` by default and exposes the API under:
