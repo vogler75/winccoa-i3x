@@ -57,8 +57,10 @@ function elemTypeToSchema(elemType) {
     case ET.Dpid:
       return { type: 'string', description: 'Dpid' };
     case ET.Typeref:
-      // Typeref is an enum stored as an integer in WinCC OA
-      return { type: 'integer', description: 'Typeref' };
+      // Bare Typeref leaf (no referenced type available). Callers of
+      // `dpTypeNodeToSchema` should pass a resolver so the referenced type
+      // can be expanded inline instead of hitting this fallback.
+      return { type: 'object', description: 'Typeref' };
     default:
       // Dyn* types — treat as array of the base type (best effort)
       return { type: 'array', items: { type: 'string' }, description: `ElementType(${elemType})` };
@@ -67,20 +69,46 @@ function elemTypeToSchema(elemType) {
 
 /**
  * Recursively convert a WinccoaDpTypeNode tree to a JSON Schema object.
+ *
+ * Typeref nodes: prefer inline children when present; otherwise the caller
+ * can pass `resolveRef(refName)` that returns the referenced DpTypeNode.
+ * `visited` guards against typeref cycles.
+ *
  * @param {object} typeNode  WinccoaDpTypeNode
+ * @param {(refName: string) => object|null} [resolveRef]
+ * @param {Set<string>} [visited]
  * @returns {object} JSON Schema
  */
-function dpTypeNodeToSchema(typeNode) {
-  if (typeNode.type === ET.Struct) {
-    const properties = {};
-    if (Array.isArray(typeNode.children)) {
-      for (const child of typeNode.children) {
-        properties[child.name] = dpTypeNodeToSchema(child);
+function dpTypeNodeToSchema(typeNode, resolveRef = null, visited = new Set()) {
+  if (typeNode.type === ET.Typeref) {
+    if (Array.isArray(typeNode.children) && typeNode.children.length > 0) {
+      return structChildrenToSchema(typeNode.children, resolveRef, visited);
+    }
+    const refName = typeNode.refName;
+    if (refName && !visited.has(refName) && typeof resolveRef === 'function') {
+      const resolved = resolveRef(refName);
+      if (resolved) {
+        const next = new Set(visited);
+        next.add(refName);
+        return dpTypeNodeToSchema(resolved, resolveRef, next);
       }
     }
-    return { type: 'object', properties };
+    return { type: 'object', description: refName ? `Typeref<${refName}>` : 'Typeref' };
+  }
+  if (typeNode.type === ET.Struct) {
+    return structChildrenToSchema(typeNode.children, resolveRef, visited);
   }
   return elemTypeToSchema(typeNode.type);
+}
+
+function structChildrenToSchema(children, resolveRef, visited) {
+  const properties = {};
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      properties[child.name] = dpTypeNodeToSchema(child, resolveRef, visited);
+    }
+  }
+  return { type: 'object', properties };
 }
 
 /**

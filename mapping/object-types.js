@@ -6,6 +6,14 @@ const { dpTypeNodeToSchema, elemTypeToSchema, ET } = require('../utils/json-sche
 
 const winccoa = new WinccoaManager();
 
+/**
+ * Fetches a referenced DpType tree for `Typeref` expansion in JSON Schema.
+ * Returns null when the referenced type does not exist.
+ */
+function resolveTyperef(refName) {
+  try { return winccoa.dpTypeGet(refName, true); } catch (_e) { return null; }
+}
+
 const BASE_TYPE_NS = 'http://i3x.dev/base';
 
 /**
@@ -76,7 +84,7 @@ async function buildObjectTypeList(filter) {
       displayName: typeName,
       namespaceUri: nsUri,
       sourceTypeId: typeName,
-      schema: dpTypeNodeToSchema(typeNode),
+      schema: dpTypeNodeToSchema(typeNode, resolveTyperef),
     });
   }
 
@@ -96,7 +104,7 @@ async function getObjectTypesByIds(elementIds) {
       displayName: typeName,
       namespaceUri: typeNameToUri(typeName),
       sourceTypeId: typeName,
-      schema: dpTypeNodeToSchema(typeNode),
+      schema: dpTypeNodeToSchema(typeNode, resolveTyperef),
     };
   });
 }

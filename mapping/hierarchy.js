@@ -19,6 +19,7 @@ const winccoa = new WinccoaManager();
  *   - DP root (struct)               → isComposition=true, typeElementId=<DpType>
  *   - DP root (primitive/scalar)     → isComposition=false, typeElementId=<DpType>
  *   - Struct sub-node (inline)       → isComposition=true, typeElementId='object'
+ *   - Struct sub-node (Typeref)      → isComposition=true, typeElementId=<referenced DpType>
  *   - Primitive leaf element         → isComposition=false, typeElementId='Float'/…
  *
  * DpInfo shape (present for every node that maps to a DP or DPE):
@@ -118,16 +119,17 @@ async function getRelationships(elementId) {
 }
 
 /**
- * Resolve an elementId to a single DPE string. Returns null for struct
- * nodes (they don't have a single DPE) and for folders/unknowns.
+ * Resolve an elementId to a single DPE string. Returns null for composite
+ * nodes (Struct/Typeref — they don't have a single DPE) and for folders/unknowns.
  */
 async function elementIdToDpe(elementId) {
   const info = await getObjectValueInfo(elementId);
   if (!info) return null;
+  const cache = await getCache();
   const typeNode = await getTypeNode(info.typeName);
   if (!typeNode) return null;
-  const sub = findTypeNode(typeNode, info.subPath ? info.subPath.split('.') : []);
-  if (!sub || sub.type === ET.Struct) return null;
+  const sub = findTypeNode(typeNode, info.subPath ? info.subPath.split('.') : [], cache.typeNodes);
+  if (!sub || isComposite(sub)) return null;
   return buildDpeAddress(info);
 }
 
@@ -234,7 +236,7 @@ function buildInstancesFromDpNames(instances, valueMap, typeNodes) {
  */
 function addDpInstance(elementId, displayName, parentId, dpName, typeName, instances, valueMap, typeNodes) {
   const typeNode = resolveTypeNode(typeName, typeNodes);
-  const rootIsStruct = typeNode && typeNode.type === ET.Struct;
+  const rootIsComposite = typeNode && isComposite(typeNode);
   const nsUri = typeNameToUri(typeName);
 
   instances.push({
@@ -242,13 +244,19 @@ function addDpInstance(elementId, displayName, parentId, dpName, typeName, insta
     displayName,
     typeElementId: typeName,
     parentId,
-    isComposition: !!rootIsStruct,
+    isComposition: !!rootIsComposite,
     namespaceUri: nsUri,
   });
   valueMap.set(elementId, { dpName, typeName, subPath: '' });
 
-  if (rootIsStruct && Array.isArray(typeNode.children) && typeNode.children.length > 0) {
-    expandTypeChildren(typeNode.children, elementId, elementId, dpName, typeName, nsUri, instances, valueMap, '');
+  if (rootIsComposite) {
+    const children = getEffectiveChildren(typeNode, typeNodes);
+    if (children.length > 0) {
+      const visited = typeNode.type === ET.Typeref && typeNode.refName
+        ? new Set([typeNode.refName])
+        : new Set();
+      expandTypeChildren(children, elementId, elementId, dpName, typeName, nsUri, instances, valueMap, '', typeNodes, visited);
+    }
   }
 }
 
@@ -259,26 +267,44 @@ function addDpInstance(elementId, displayName, parentId, dpName, typeName, insta
  *   rootElemId:      DP-root elementId — used to build child elementIds
  *   dpName/typeName: parent DP identity (same for every descendant)
  *   elemPathPrefix:  dot-joined path from the DP root to the current level
+ *   typeNodes:       shared type-node cache (for resolving Typeref refNames)
+ *   visitedRefs:     Typeref refNames on the current path — guards against cycles
  */
-function expandTypeChildren(children, parentElemId, rootElemId, dpName, typeName, nsUri, instances, valueMap, elemPathPrefix) {
+function expandTypeChildren(children, parentElemId, rootElemId, dpName, typeName, nsUri, instances, valueMap, elemPathPrefix, typeNodes, visitedRefs = new Set()) {
   for (const child of children) {
     const subPath = elemPathPrefix ? `${elemPathPrefix}.${child.name}` : child.name;
     const childElemId = `${rootElemId}/${subPath.replace(/\./g, '/')}`;
     const isStruct = child.type === ET.Struct;
+    const isTyperef = child.type === ET.Typeref;
+    const composite = isStruct || isTyperef;
+
+    let typeElementId;
+    if (isStruct) typeElementId = 'object';
+    else if (isTyperef) typeElementId = child.refName || 'Typeref';
+    else typeElementId = elemTypeName(child.type);
 
     instances.push({
       elementId: childElemId,
       displayName: child.name,
-      typeElementId: isStruct ? 'object' : elemTypeName(child.type),
+      typeElementId,
       parentId: parentElemId,
-      isComposition: isStruct,
+      isComposition: composite,
       namespaceUri: nsUri,
     });
     valueMap.set(childElemId, { dpName, typeName, subPath });
 
-    if (isStruct && Array.isArray(child.children) && child.children.length > 0) {
-      expandTypeChildren(child.children, childElemId, rootElemId, dpName, typeName, nsUri, instances, valueMap, subPath);
-    }
+    if (!composite) continue;
+
+    if (isTyperef && child.refName && visitedRefs.has(child.refName)) continue;
+
+    const effective = getEffectiveChildren(child, typeNodes);
+    if (effective.length === 0) continue;
+
+    const nextVisited = isTyperef && child.refName
+      ? new Set(visitedRefs).add(child.refName)
+      : visitedRefs;
+
+    expandTypeChildren(effective, childElemId, rootElemId, dpName, typeName, nsUri, instances, valueMap, subPath, typeNodes, nextVisited);
   }
 }
 
@@ -290,11 +316,33 @@ function resolveTypeNode(typeName, typeNodes) {
   return node;
 }
 
-function findTypeNode(node, segments) {
+function isComposite(node) {
+  return !!node && (node.type === ET.Struct || node.type === ET.Typeref);
+}
+
+/**
+ * Return the children to traverse for a composite node. For a Struct, that's
+ * its own `children` array. For a Typeref, prefer inline children when the
+ * winccoa-manager has pre-expanded them (includeSubTypes=true can inline
+ * referenced types); otherwise resolve via `refName` to the referenced
+ * DpType's children. Returns `[]` for leaves or unresolvable refs.
+ */
+function getEffectiveChildren(node, typeNodes) {
+  if (!node) return [];
+  if (Array.isArray(node.children) && node.children.length > 0) return node.children;
+  if (node.type === ET.Typeref && node.refName) {
+    const ref = resolveTypeNode(node.refName, typeNodes);
+    if (ref && Array.isArray(ref.children)) return ref.children;
+  }
+  return [];
+}
+
+function findTypeNode(node, segments, typeNodes) {
   if (!node || !segments.length) return node;
+  const children = getEffectiveChildren(node, typeNodes);
   const [head, ...tail] = segments;
-  const child = (node.children || []).find(c => c.name === head);
-  return tail.length ? findTypeNode(child, tail) : child;
+  const child = children.find(c => c.name === head);
+  return tail.length ? findTypeNode(child, tail, typeNodes) : child;
 }
 
 /**
@@ -350,22 +398,35 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
         try { typeName = winccoa.dpTypeName(`${dpRoot}.`); } catch (_e) {}
         if (typeName && !typeName.startsWith('_')) {
           const typeNode = resolveTypeNode(typeName, typeNodes);
-          const subNode = findTypeNode(typeNode, subPath.split('.'));
-          const isStruct = subNode && subNode.type === ET.Struct;
+          const subNode = findTypeNode(typeNode, subPath.split('.'), typeNodes);
+          const subIsStruct = subNode && subNode.type === ET.Struct;
+          const subIsTyperef = subNode && subNode.type === ET.Typeref;
+          const subComposite = subIsStruct || subIsTyperef;
           const nsUri = typeNameToUri(typeName);
+
+          let subTypeElementId;
+          if (subIsStruct) subTypeElementId = 'object';
+          else if (subIsTyperef) subTypeElementId = subNode.refName || 'Typeref';
+          else subTypeElementId = subNode ? elemTypeName(subNode.type) : 'object';
 
           instances.push({
             elementId: myElemId,
             displayName: nodeName,
-            typeElementId: isStruct ? 'object' : (subNode ? elemTypeName(subNode.type) : 'object'),
+            typeElementId: subTypeElementId,
             parentId: parentElemId,
-            isComposition: !!isStruct,
+            isComposition: !!subComposite,
             namespaceUri: nsUri,
           });
           valueMap.set(myElemId, { dpName: dpRoot, typeName, subPath });
 
-          if (isStruct && Array.isArray(subNode.children) && subNode.children.length > 0) {
-            expandTypeChildren(subNode.children, myElemId, myElemId, dpRoot, typeName, nsUri, instances, valueMap, subPath);
+          if (subComposite) {
+            const effective = getEffectiveChildren(subNode, typeNodes);
+            if (effective.length > 0) {
+              const visited = subIsTyperef && subNode.refName
+                ? new Set([subNode.refName])
+                : new Set();
+              expandTypeChildren(effective, myElemId, myElemId, dpRoot, typeName, nsUri, instances, valueMap, subPath, typeNodes, visited);
+            }
           }
           pushedEntity = true;
         }
@@ -393,28 +454,37 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
 // ── Leaf-walking helper (value/subscription readers) ──────────────────────
 
 async function collectDpeLeaves(info) {
+  const cache = await getCache();
   const rootType = await getTypeNode(info.typeName);
   if (!rootType) return [];
-  const startNode = findTypeNode(rootType, info.subPath ? info.subPath.split('.') : []);
+  const startNode = findTypeNode(rootType, info.subPath ? info.subPath.split('.') : [], cache.typeNodes);
   if (!startNode) return [];
 
   const out = [];
-  function walk(node, relPath) {
-    if (node.type === ET.Struct) {
-      for (const child of node.children || []) {
-        walk(child, relPath ? `${relPath}.${child.name}` : child.name);
+  function walk(node, relPath, visitedRefs) {
+    if (isComposite(node)) {
+      if (node.type === ET.Typeref && node.refName && visitedRefs.has(node.refName)) return;
+      const children = getEffectiveChildren(node, cache.typeNodes);
+      const nextVisited = node.type === ET.Typeref && node.refName
+        ? new Set(visitedRefs).add(node.refName)
+        : visitedRefs;
+      for (const child of children) {
+        walk(child, relPath ? `${relPath}.${child.name}` : child.name, nextVisited);
       }
-    } else {
-      const dpe = buildDpeAddress({
-        dpName: info.dpName,
-        subPath: info.subPath
-          ? (relPath ? `${info.subPath}.${relPath}` : info.subPath)
-          : relPath,
-      });
-      out.push({ relPath, dpe });
+      return;
     }
+    const dpe = buildDpeAddress({
+      dpName: info.dpName,
+      subPath: info.subPath
+        ? (relPath ? `${info.subPath}.${relPath}` : info.subPath)
+        : relPath,
+    });
+    out.push({ relPath, dpe });
   }
-  walk(startNode, '');
+  const initialVisited = startNode.type === ET.Typeref && startNode.refName
+    ? new Set([startNode.refName])
+    : new Set();
+  walk(startNode, '', initialVisited);
   return out;
 }
 

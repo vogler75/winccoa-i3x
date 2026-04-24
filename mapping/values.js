@@ -2,8 +2,7 @@
 
 const { WinccoaManager } = require('winccoa-manager');
 const { mapQuality } = require('../utils/quality');
-const { collectDpeLeaves, getObjectValueInfo, getTypeNode } = require('./hierarchy');
-const { ET } = require('../utils/json-schema');
+const { collectDpeLeaves, getObjectValueInfo, elementIdToDpe } = require('./hierarchy');
 
 const winccoa = new WinccoaManager();
 
@@ -188,26 +187,10 @@ async function readObjectHistory(elementId, startTime, endTime, maxValues) {
  * Returns true on success, false if the elementId does not map to a leaf.
  */
 async function writeObjectValue(elementId, value) {
-  const info = await getObjectValueInfo(elementId);
-  if (!info) return false;
-  const typeRoot = await getTypeNode(info.typeName);
-  if (!typeRoot) return false;
-  const startNode = findInTypeTree(typeRoot, info.subPath);
-  if (!startNode || startNode.type === ET.Struct) return false;
-  const dpe = info.subPath ? `${info.dpName}.${info.subPath}` : `${info.dpName}.`;
+  const dpe = await elementIdToDpe(elementId);
+  if (!dpe) return false;
   await setDpeValue(dpe, value);
   return true;
-}
-
-function findInTypeTree(root, subPath) {
-  if (!subPath) return root;
-  const segments = subPath.split('.');
-  let node = root;
-  for (const seg of segments) {
-    if (!node || !Array.isArray(node.children)) return null;
-    node = node.children.find(c => c.name === seg);
-  }
-  return node;
 }
 
 module.exports = {
