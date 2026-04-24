@@ -5,14 +5,14 @@
  *
  * In-memory subscription store.
  * Each subscription has:
- *   - id (uuid)
+ *   - id (UUID)
  *   - created (Date)
  *   - monitoredItems: Map<elementId, { dpeName, connectId, maxDepth }>
  *   - valueQueue: Array<SyncItem>  — for poll-based sync
  *   - sseClients: Set<Response>    — active SSE connections
  */
 
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('crypto');
 
 /** @type {Map<string, Subscription>} */
 const _subscriptions = new Map();
@@ -22,7 +22,7 @@ const _subscriptions = new Map();
  * @returns {string} subscriptionId
  */
 function createSubscription() {
-  const id = uuidv4();
+  const id = randomUUID();
   _subscriptions.set(id, {
     id,
     created: new Date(),
