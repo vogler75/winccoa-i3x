@@ -3,7 +3,7 @@
   "port": 8080,
   "basePath": "/i3x/v0",
   "auth": {
-    "enabled": true
+    "enabled": false
   },
   "cns": {
     "namespaceView": "I3X_Namespaces",

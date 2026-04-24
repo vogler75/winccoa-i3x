@@ -14,6 +14,10 @@
 
 const { randomUUID } = require('crypto');
 
+// Cap the /sync queue so a subscription that is never polled cannot grow
+// the process memory without bound. Oldest entries are dropped first.
+const MAX_QUEUE_SIZE = 10_000;
+
 /** @type {Map<string, Subscription>} */
 const _subscriptions = new Map();
 
@@ -91,8 +95,12 @@ function pushUpdate(id, elementId, vqt) {
 
   const item = { [elementId]: { data: [vqt] } };
 
-  // Enqueue for sync
+  // Enqueue for sync, bounded to prevent unbounded memory growth when
+  // /sync is never called (e.g. SSE-only subscriptions).
   sub.valueQueue.push(item);
+  if (sub.valueQueue.length > MAX_QUEUE_SIZE) {
+    sub.valueQueue.splice(0, sub.valueQueue.length - MAX_QUEUE_SIZE);
+  }
 
   // Push to SSE streams
   const payload = `data: ${JSON.stringify([item])}\n\n`;

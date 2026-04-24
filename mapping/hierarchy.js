@@ -111,6 +111,33 @@ async function elementIdToDpe(elementId) {
 }
 
 /**
+ * Resolve elementIds to leaf DPE elementIds, expanding up to maxDepth levels.
+ * At the depth boundary, composition nodes that still have children are
+ * omitted — they would otherwise be silently dropped downstream because
+ * they do not resolve to a DPE via elementIdToDpe().
+ */
+async function resolveLeafIds(elementIds, maxDepth = 1) {
+  if (maxDepth <= 1) return elementIds;
+
+  const all = await buildObjectInstanceList();
+  const result = new Set();
+
+  function expand(ids, depth) {
+    for (const eid of ids) {
+      const children = all.filter(o => o.parentId === eid);
+      if (children.length === 0) {
+        result.add(eid);
+      } else if (depth > 1) {
+        expand(children.map(c => c.elementId), depth - 1);
+      }
+    }
+  }
+
+  expand(elementIds, maxDepth);
+  return [...result];
+}
+
+/**
  * Invalidate the cache — call on sysConnect DP/type events or CNS changes.
  */
 function invalidateCache() {
@@ -419,5 +446,6 @@ module.exports = {
   getObjectInstancesByIds,
   getRelatedObjects,
   elementIdToDpe,
+  resolveLeafIds,
   invalidateCache,
 };

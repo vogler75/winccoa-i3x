@@ -20,7 +20,7 @@ const express = require('express');
 const manager = require('../subscriptions/manager');
 const monitor = require('../subscriptions/monitor');
 const { setupSse } = require('../subscriptions/sse');
-const { elementIdToDpe, buildObjectInstanceList } = require('../mapping/hierarchy');
+const { elementIdToDpe, resolveLeafIds } = require('../mapping/hierarchy');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
@@ -138,11 +138,8 @@ router.get('/:id/stream', (req, res) => {
   const heartbeat = setupSse(res);
   manager.addSseClient(req.params.id, res);
 
-  // Flush any already-queued items to the new client
-  const queued = manager.drainQueue(req.params.id);
-  if (queued && queued.length > 0) {
-    res.write(`data: ${JSON.stringify(queued)}\n\n`);
-  }
+  // Do NOT drain the poll queue here — it belongs to /sync callers.
+  // SSE only receives updates from the moment of connect onward.
 
   // Clean up when the client disconnects
   req.on('close', () => {
@@ -164,31 +161,5 @@ router.post('/:id/sync', (req, res) => {
   }
   res.json({ data: items });
 });
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-/**
- * Resolve elementIds to leaf DPE elementIds, expanding up to maxDepth levels.
- */
-async function resolveLeafIds(elementIds, maxDepth) {
-  if (maxDepth <= 1) return elementIds;
-
-  const all = await buildObjectInstanceList();
-  const result = new Set();
-
-  function expand(ids, depth) {
-    for (const eid of ids) {
-      const children = all.filter(o => o.parentId === eid);
-      if (children.length === 0 || depth <= 1) {
-        result.add(eid);
-      } else {
-        expand(children.map(c => c.elementId), depth - 1);
-      }
-    }
-  }
-
-  expand(elementIds, maxDepth);
-  return [...result];
-}
 
 module.exports = router;

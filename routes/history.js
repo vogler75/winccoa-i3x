@@ -2,34 +2,10 @@
 
 const express = require('express');
 const { getDpeHistory } = require('../mapping/values');
-const { elementIdToDpe, buildObjectInstanceList } = require('../mapping/hierarchy');
+const { elementIdToDpe, resolveLeafIds } = require('../mapping/hierarchy');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
-
-/**
- * Collect all leaf elementIds up to maxDepth levels (same helper as values.js).
- */
-async function collectLeafIds(elementIds, maxDepth) {
-  if (maxDepth <= 1) return elementIds;
-
-  const all = await buildObjectInstanceList();
-  const result = new Set();
-
-  function expand(ids, depth) {
-    for (const eid of ids) {
-      const children = all.filter(o => o.parentId === eid);
-      if (children.length === 0 || depth <= 1) {
-        result.add(eid);
-      } else {
-        expand(children.map(c => c.elementId), depth - 1);
-      }
-    }
-  }
-
-  expand(elementIds, maxDepth);
-  return [...result];
-}
 
 // POST /objects/history
 // Body: { elementIds: string[], startTime: ISO string, endTime: ISO string, maxDepth?: number, maxValues?: number }
@@ -44,9 +20,7 @@ router.post('/history', async (req, res) => {
   }
 
   try {
-    const resolvedIds = maxDepth > 1
-      ? await collectLeafIds(elementIds, maxDepth)
-      : elementIds;
+    const resolvedIds = await resolveLeafIds(elementIds, maxDepth);
 
     const data = {};
     for (const eid of resolvedIds) {
@@ -88,7 +62,7 @@ router.put('/:elementId/history', async (req, res) => {
 
     for (const entry of data) {
       const ts = new Date(entry.timestamp);
-      await winccoa.dpSetTimedWait(dpe, entry.value, ts);
+      await winccoa.dpSetTimedWait(ts, dpe, entry.value);
     }
 
     res.status(204).end();

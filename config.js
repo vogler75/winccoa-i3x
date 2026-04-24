@@ -23,7 +23,7 @@ function loadConfig() {
     try {
       fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     } catch (err) {
-      console.warn('Failed to parse i3x-config.json, using defaults:', err.message);
+      console.warn('Failed to parse config.json, using defaults:', err.message);
     }
   }
 

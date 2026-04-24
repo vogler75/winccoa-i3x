@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const config = require('./config');
 const { basicAuth } = require('./auth');
+const { version } = require('./package.json');
 
 const namespacesRouter = require('./routes/namespaces');
 const objectTypesRouter = require('./routes/object-types');
@@ -32,7 +33,7 @@ function createApp() {
   const base = config.basePath;
 
   app.get(`${base}/health`, (_req, res) => {
-    res.json({ status: 'ok', version: '0.1.0' });
+    res.json({ status: 'ok', version });
   });
 
   // i3X routes

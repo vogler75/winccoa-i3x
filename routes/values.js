@@ -2,36 +2,10 @@
 
 const express = require('express');
 const { getValuesByElementIds, setDpeValue } = require('../mapping/values');
-const { buildObjectInstanceList } = require('../mapping/hierarchy');
-const { elementIdToDpe } = require('../mapping/hierarchy');
+const { elementIdToDpe, resolveLeafIds } = require('../mapping/hierarchy');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
-
-/**
- * Recursively collect all leaf elementIds up to maxDepth levels.
- * Returns a flat list of elementIds (leaf DPEs only).
- */
-async function collectLeafIds(elementIds, maxDepth) {
-  if (maxDepth <= 1) return elementIds;
-
-  const all = await buildObjectInstanceList();
-  const result = new Set();
-
-  function expand(ids, depth) {
-    for (const eid of ids) {
-      const children = all.filter(o => o.parentId === eid);
-      if (children.length === 0 || depth <= 1) {
-        result.add(eid);
-      } else {
-        expand(children.map(c => c.elementId), depth - 1);
-      }
-    }
-  }
-
-  expand(elementIds, maxDepth);
-  return [...result];
-}
 
 // POST /objects/value
 // Body: { elementIds: string[], maxDepth?: number }
@@ -42,9 +16,7 @@ router.post('/value', async (req, res) => {
   }
 
   try {
-    const resolvedIds = maxDepth > 1
-      ? await collectLeafIds(elementIds, maxDepth)
-      : elementIds;
+    const resolvedIds = await resolveLeafIds(elementIds, maxDepth);
 
     const valuesMap = await getValuesByElementIds(resolvedIds);
 
