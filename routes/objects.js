@@ -5,6 +5,7 @@ const {
   buildObjectInstanceList,
   getObjectInstancesByIds,
   getRelatedObjects,
+  getRelationships,
 } = require('../mapping/hierarchy');
 const { sendSuccess, sendBulk, bulkItem } = require('../utils/response');
 const { sendError } = require('../utils/errors');
@@ -13,10 +14,10 @@ const router = express.Router();
 
 /**
  * Serialize a cached ObjectInstance record into the v1 ObjectInstanceResponse
- * shape. Internal fields (namespaceUri) are moved behind `metadata` and only
- * included when the caller requested `includeMetadata`.
+ * shape. Internal fields move behind `metadata` and are only populated when
+ * the caller requested `includeMetadata`.
  */
-function serializeInstance(rec, includeMetadata) {
+async function serializeInstance(rec, includeMetadata) {
   const out = {
     elementId: rec.elementId,
     displayName: rec.displayName,
@@ -30,12 +31,16 @@ function serializeInstance(rec, includeMetadata) {
       typeNamespaceUri: rec.namespaceUri || null,
       sourceTypeId: rec.typeElementId,
       description: null,
-      relationships: null,
+      relationships: await getRelationships(rec.elementId),
       extendedAttributes: null,
       system: null,
     };
   }
   return out;
+}
+
+async function serializeMany(recs, includeMetadata) {
+  return Promise.all(recs.map(r => serializeInstance(r, includeMetadata)));
 }
 
 function parseBool(v) {
@@ -54,7 +59,7 @@ router.get('/', async (req, res) => {
 
     const includeMetadata = parseBool(req.query.includeMetadata);
     const objects = await buildObjectInstanceList(Object.keys(filter).length ? filter : undefined);
-    sendSuccess(res, objects.map(r => serializeInstance(r, includeMetadata)));
+    sendSuccess(res, await serializeMany(objects, includeMetadata));
   } catch (exc) {
     console.error('GET /objects failed:', exc);
     sendError(res, 500, 'Internal error', String(exc));
@@ -70,14 +75,18 @@ router.post('/list', async (req, res) => {
   try {
     const matches = await getObjectInstancesByIds(elementIds);
     const byId = new Map(matches.map(r => [r.elementId, r]));
-    const items = elementIds.map(eid => {
+    const items = [];
+    for (const eid of elementIds) {
       const rec = byId.get(eid);
-      if (rec) return bulkItem({ elementId: eid, result: serializeInstance(rec, includeMetadata) });
-      return bulkItem({
-        elementId: eid,
-        error: { code: 404, message: `Object '${eid}' not found` },
-      });
-    });
+      if (rec) {
+        items.push(bulkItem({ elementId: eid, result: await serializeInstance(rec, includeMetadata) }));
+      } else {
+        items.push(bulkItem({
+          elementId: eid,
+          error: { code: 404, message: `Object '${eid}' not found` },
+        }));
+      }
+    }
     sendBulk(res, items);
   } catch (exc) {
     console.error('POST /objects/list failed:', exc);
@@ -103,10 +112,10 @@ router.post('/related', async (req, res) => {
     const items = [];
     for (const eid of elementIds) {
       const matches = await getRelatedObjects([eid], relationshipType);
-      const related = matches.map(rec => ({
+      const related = await Promise.all(matches.map(async rec => ({
         sourceRelationship: resolveSourceRelationship(eid, rec, relationshipType),
-        object: serializeInstance(rec, includeMetadata),
-      }));
+        object: await serializeInstance(rec, includeMetadata),
+      })));
       items.push(bulkItem({ elementId: eid, result: related }));
     }
     sendBulk(res, items);

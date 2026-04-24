@@ -2,45 +2,75 @@
 
 const { WinccoaManager } = require('winccoa-manager');
 const { typeNameToUri } = require('./namespaces');
-const { dpTypeNodeToSchema } = require('../utils/json-schema');
+const { dpTypeNodeToSchema, elemTypeToSchema, ET } = require('../utils/json-schema');
 
 const winccoa = new WinccoaManager();
 
-const FOLDER_TYPE = {
-  elementId: 'FolderType',
-  displayName: 'FolderType',
-  namespaceUri: 'http://winccoa.local/FolderType',
-  sourceTypeId: 'FolderType',
-  schema: { type: 'object', properties: {} },
-};
+const BASE_TYPE_NS = 'http://i3x.dev/base';
 
 /**
- * Build the list of i3X ObjectType objects from WinCC OA DP types.
- * Shape per i3X v1 spec:
- *   { elementId, displayName, namespaceUri, sourceTypeId, schema, version?, related? }
- *
- * @param {{ namespaceUri?: string }} [filter]
- * @returns {Array<object>}
+ * Synthetic, built-in ObjectTypes. These back the `typeElementId` references
+ * we place on nested ObjectInstances:
+ *   - `FolderType`  — CNS folder nodes
+ *   - `object`      — inline struct sub-nodes (no named WinCC OA type)
+ *   - primitives    — leaf DPE element types (Float, Bool, …) from WinccoaElementType
  */
+function buildSyntheticTypes() {
+  const types = [
+    {
+      elementId: 'FolderType',
+      displayName: 'FolderType',
+      namespaceUri: BASE_TYPE_NS,
+      sourceTypeId: 'FolderType',
+      schema: { type: 'object', properties: {} },
+    },
+    {
+      elementId: 'object',
+      displayName: 'object',
+      namespaceUri: BASE_TYPE_NS,
+      sourceTypeId: 'object',
+      schema: { type: 'object', additionalProperties: true },
+    },
+  ];
+  for (const [name, et] of Object.entries(ET)) {
+    if (name === 'Struct') continue;
+    types.push({
+      elementId: name,
+      displayName: name,
+      namespaceUri: BASE_TYPE_NS,
+      sourceTypeId: name,
+      schema: elemTypeToSchema(et),
+    });
+  }
+  return types;
+}
+
+const SYNTHETIC_TYPES = buildSyntheticTypes();
+const SYNTHETIC_BY_ID = new Map(SYNTHETIC_TYPES.map(t => [t.elementId, t]));
+
 async function buildObjectTypeList(filter) {
-  const typeNames = winccoa.dpTypes('*');
   const result = [];
 
+  // Synthetic types first, filtered by namespace if requested.
+  for (const t of SYNTHETIC_TYPES) {
+    if (!filter || !filter.namespaceUri || filter.namespaceUri === t.namespaceUri) {
+      result.push(t);
+    }
+  }
+
+  // WinCC OA DP types.
+  const typeNames = winccoa.dpTypes('*');
   for (const typeName of typeNames) {
     if (typeName.startsWith('_')) continue;
 
     const nsUri = typeNameToUri(typeName);
-
-    if (filter && filter.namespaceUri && nsUri !== filter.namespaceUri) {
-      continue;
-    }
+    if (filter && filter.namespaceUri && nsUri !== filter.namespaceUri) continue;
 
     const typeNode = winccoa.dpTypeGet(typeName, true);
     if (!typeNode) {
       console.warn('dpTypeGet returned null for type:', typeName);
       continue;
     }
-
     result.push({
       elementId: typeName,
       displayName: typeName,
@@ -50,23 +80,12 @@ async function buildObjectTypeList(filter) {
     });
   }
 
-  if (!filter || !filter.namespaceUri || filter.namespaceUri === FOLDER_TYPE.namespaceUri) {
-    result.unshift(FOLDER_TYPE);
-  }
-
   return result;
 }
 
-/**
- * Get specific ObjectTypes by elementId array.
- * Returns one entry per requested id; null entries for unknown ids so the
- * caller can build a per-item bulk response.
- * @param {string[]} elementIds
- * @returns {Array<object|null>} same length as elementIds
- */
 async function getObjectTypesByIds(elementIds) {
   return elementIds.map(typeName => {
-    if (typeName === 'FolderType') return FOLDER_TYPE;
+    if (SYNTHETIC_BY_ID.has(typeName)) return SYNTHETIC_BY_ID.get(typeName);
     if (typeName.startsWith('_')) return null;
 
     const typeNode = winccoa.dpTypeGet(typeName, true);

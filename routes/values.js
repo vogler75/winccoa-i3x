@@ -3,49 +3,87 @@
 const express = require('express');
 const { getDpeValues, setDpeValue } = require('../mapping/values');
 const {
-  elementIdToDpe,
+  buildObjectInstanceList,
   getObjectInstancesByIds,
-  collectLeafDescendants,
+  getObjectValueInfo,
+  collectDpeLeaves,
+  getTypeNode,
+  elementIdToDpe,
 } = require('../mapping/hierarchy');
+const { ET } = require('../utils/json-schema');
 const { sendSuccess, sendBulk, bulkItem } = require('../utils/response');
 const { sendError } = require('../utils/errors');
 
 const router = express.Router();
 
 /**
- * Build a v1 CurrentValueResult for a single elementId.
- *  - Leaf DPE        → { isComposition: false, value, quality, timestamp }
- *  - Composition     → { isComposition: true,  value: null, quality: 'GoodNoData',
- *                        timestamp: now, components?: { relPath: VQT } }
- *  - Unknown id      → throws (caller converts to an error bulk item)
- *
- * `components` is present only when maxDepth > 1 (or 0=infinite), per spec.
+ * Read VQT for a single primitive-leaf ObjectInstance. Returns null for
+ * unknown or non-leaf elementIds.
  */
-async function readCurrentValue(eid, maxDepth) {
-  const dpe = await elementIdToDpe(eid);
-  if (dpe) {
-    const [vqt] = await getDpeValues([dpe]);
-    return { isComposition: false, ...vqt };
-  }
-  const [rec] = await getObjectInstancesByIds([eid]);
+async function readLeafVqt(elementId) {
+  const info = await getObjectValueInfo(elementId);
+  if (!info) return null;
+  const typeNode = await getTypeNode(info.typeName);
+  if (!typeNode) return null;
+  const node = info.subPath
+    ? findNode(typeNode, info.subPath.split('.'))
+    : typeNode;
+  if (!node || node.type === ET.Struct) return null;
+  const dpe = info.subPath ? `${info.dpName}.${info.subPath}` : `${info.dpName}.`;
+  const [vqt] = await getDpeValues([dpe]);
+  return vqt;
+}
+
+function findNode(node, segments) {
+  if (!segments.length) return node;
+  const [head, ...tail] = segments;
+  const child = (node.children || []).find(c => c.name === head);
+  return tail.length ? findNode(child, tail) : child;
+}
+
+/**
+ * Build a v1 CurrentValueResult for a single elementId.
+ *   - Primitive leaf          → scalar VQT
+ *   - Struct sub-node / root  → value=null, components when maxDepth > 1
+ *   - Folder                  → value=null, components with child object VQTs
+ *                               when maxDepth > 1
+ */
+async function buildCurrentValue(elementId, maxDepth) {
+  const [rec] = await getObjectInstancesByIds([elementId]);
   if (!rec) {
-    const err = new Error(`Object '${eid}' not found`);
+    const err = new Error(`Object '${elementId}' not found`);
     err.code = 404;
     throw err;
   }
+
+  if (!rec.isComposition) {
+    const vqt = await readLeafVqt(elementId);
+    if (!vqt) {
+      return { isComposition: false, value: null, quality: 'Bad', timestamp: new Date().toISOString() };
+    }
+    return { isComposition: false, ...vqt };
+  }
+
   const result = {
     isComposition: true,
     value: null,
     quality: 'GoodNoData',
     timestamp: new Date().toISOString(),
   };
+
   if (maxDepth !== 1) {
-    const leaves = await collectLeafDescendants(eid, maxDepth);
+    const childDepth = maxDepth === 0 ? 0 : maxDepth - 1;
+    const children = await buildObjectInstanceList({ parentId: elementId });
     const components = {};
-    if (leaves.length > 0) {
-      const vqts = await getDpeValues(leaves.map(l => l.dpe));
-      for (let i = 0; i < leaves.length; i++) {
-        components[leaves[i].relPath] = vqts[i];
+    for (const child of children) {
+      try {
+        components[child.elementId] = await buildCurrentValue(child.elementId, childDepth);
+      } catch (exc) {
+        components[child.elementId] = {
+          value: null,
+          quality: 'Bad',
+          timestamp: new Date().toISOString(),
+        };
       }
     }
     result.components = components;
@@ -63,7 +101,7 @@ router.post('/value', async (req, res) => {
     const items = [];
     for (const eid of elementIds) {
       try {
-        const result = await readCurrentValue(eid, maxDepth);
+        const result = await buildCurrentValue(eid, maxDepth);
         items.push(bulkItem({ elementId: eid, result }));
       } catch (exc) {
         const code = exc.code || 500;
@@ -80,7 +118,7 @@ router.post('/value', async (req, res) => {
   }
 });
 
-// PUT /objects/{elementId}/value   Body: raw value (any JSON)
+// PUT /objects/{elementId}/value   Body: raw JSON value
 router.put('/:elementId/value', async (req, res) => {
   const elementId = decodeURIComponent(req.params.elementId);
   const value = req.body;
@@ -90,7 +128,7 @@ router.put('/:elementId/value', async (req, res) => {
   try {
     const dpe = await elementIdToDpe(elementId);
     if (!dpe) {
-      return sendError(res, 404, 'Object not found', `No writable DPE for elementId '${elementId}'`);
+      return sendError(res, 404, 'Object not found', `No writable leaf DPE for elementId '${elementId}' — struct nodes are not writable as a whole`);
     }
     await setDpeValue(dpe, value);
     sendSuccess(res, null);

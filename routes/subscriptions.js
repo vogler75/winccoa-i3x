@@ -16,7 +16,7 @@ const express = require('express');
 const manager = require('../subscriptions/manager');
 const monitor = require('../subscriptions/monitor');
 const { setupSse } = require('../subscriptions/sse');
-const { elementIdToDpe, resolveLeafIds } = require('../mapping/hierarchy');
+const { getObjectValueInfo } = require('../mapping/hierarchy');
 const { sendSuccess, sendBulk, bulkItem } = require('../utils/response');
 const { sendError } = require('../utils/errors');
 
@@ -44,17 +44,33 @@ router.post('/register', async (req, res) => {
   if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   try {
-    const leafIds = await resolveLeafIds(elementIds, maxDepth || 1);
-    const seen = new Set();
-    for (const eid of leafIds) {
-      if (sub.monitoredItems.has(eid)) { seen.add(eid); continue; }
-      const dpe = await elementIdToDpe(eid);
-      if (!dpe) continue;
-      const connectId = monitor.connect(subscriptionId, eid, dpe);
-      sub.monitoredItems.set(eid, { dpeName: dpe, connectId, maxDepth });
-      seen.add(eid);
+    const items = [];
+    for (const eid of elementIds) {
+      if (sub.monitoredItems.has(eid)) {
+        items.push(bulkItem({ elementId: eid, subscriptionId }));
+        continue;
+      }
+      const info = await getObjectValueInfo(eid);
+      if (!info) {
+        items.push(bulkItem({
+          elementId: eid,
+          subscriptionId,
+          error: { code: 404, message: `Object '${eid}' is not monitorable (folder or unknown)` },
+        }));
+        continue;
+      }
+      const connectId = await monitor.connect(subscriptionId, eid);
+      if (connectId === null) {
+        items.push(bulkItem({
+          elementId: eid,
+          subscriptionId,
+          error: { code: 404, message: `Object '${eid}' has no monitorable DPE leaves` },
+        }));
+        continue;
+      }
+      sub.monitoredItems.set(eid, { connectId, maxDepth });
+      items.push(bulkItem({ elementId: eid, subscriptionId }));
     }
-    const items = elementIds.map(eid => bulkItem({ elementId: eid, subscriptionId }));
     sendBulk(res, items);
   } catch (exc) {
     console.error('POST /subscriptions/register failed:', exc);
@@ -65,7 +81,7 @@ router.post('/register', async (req, res) => {
 // ── Unregister ────────────────────────────────────────────────────────────
 
 router.post('/unregister', async (req, res) => {
-  const { subscriptionId, elementIds, maxDepth = 1 } = req.body || {};
+  const { subscriptionId, elementIds } = req.body || {};
   if (!subscriptionId) {
     return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
@@ -75,20 +91,14 @@ router.post('/unregister', async (req, res) => {
   const sub = manager.getSubscription(subscriptionId);
   if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
-  try {
-    const leafIds = await resolveLeafIds(elementIds, maxDepth || 1);
-    for (const eid of leafIds) {
-      const item = sub.monitoredItems.get(eid);
-      if (!item) continue;
-      monitor.disconnect(item.connectId);
-      sub.monitoredItems.delete(eid);
-    }
-    const items = elementIds.map(eid => bulkItem({ elementId: eid, subscriptionId }));
-    sendBulk(res, items);
-  } catch (exc) {
-    console.error('POST /subscriptions/unregister failed:', exc);
-    sendError(res, 500, 'Internal error', String(exc));
+  for (const eid of elementIds) {
+    const item = sub.monitoredItems.get(eid);
+    if (!item) continue;
+    monitor.disconnect(item.connectId);
+    sub.monitoredItems.delete(eid);
   }
+  const items = elementIds.map(eid => bulkItem({ elementId: eid, subscriptionId }));
+  sendBulk(res, items);
 });
 
 // ── Stream (SSE over POST) ────────────────────────────────────────────────
