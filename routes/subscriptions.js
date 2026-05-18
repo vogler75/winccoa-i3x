@@ -22,25 +22,35 @@ const { sendError } = require('../utils/errors');
 
 const router = express.Router();
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
 // ── Create ────────────────────────────────────────────────────────────────
 
 router.post('/', (req, res) => {
   const { clientId, displayName } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   const subscriptionId = manager.createSubscription({ clientId, displayName });
-  sendSuccess(res, { clientId: clientId || null, subscriptionId, displayName: displayName || null });
+  sendSuccess(res, { clientId, subscriptionId, displayName: displayName || null });
 });
 
 // ── Register monitored items ──────────────────────────────────────────────
 
 router.post('/register', async (req, res) => {
-  const { subscriptionId, elementIds, maxDepth = 1 } = req.body || {};
+  const { clientId, subscriptionId, elementIds, maxDepth = 1 } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!subscriptionId) {
     return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
   if (!Array.isArray(elementIds)) {
     return sendError(res, 400, 'Validation error', '"elementIds" array is required');
   }
-  const sub = manager.getSubscription(subscriptionId);
+  const sub = manager.getSubscription(subscriptionId, clientId);
   if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   try {
@@ -81,14 +91,17 @@ router.post('/register', async (req, res) => {
 // ── Unregister ────────────────────────────────────────────────────────────
 
 router.post('/unregister', async (req, res) => {
-  const { subscriptionId, elementIds } = req.body || {};
+  const { clientId, subscriptionId, elementIds } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!subscriptionId) {
     return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
   if (!Array.isArray(elementIds)) {
     return sendError(res, 400, 'Validation error', '"elementIds" array is required');
   }
-  const sub = manager.getSubscription(subscriptionId);
+  const sub = manager.getSubscription(subscriptionId, clientId);
   if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   for (const eid of elementIds) {
@@ -104,15 +117,18 @@ router.post('/unregister', async (req, res) => {
 // ── Stream (SSE over POST) ────────────────────────────────────────────────
 
 router.post('/stream', (req, res) => {
-  const { subscriptionId } = req.body || {};
+  const { clientId, subscriptionId } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!subscriptionId) {
     return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
-  const sub = manager.getSubscription(subscriptionId);
+  const sub = manager.getSubscription(subscriptionId, clientId);
   if (!sub) return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
 
   const heartbeat = setupSse(res);
-  manager.addSseClient(subscriptionId, res);
+  manager.addSseClient(subscriptionId, clientId, res);
 
   req.on('close', () => {
     clearInterval(heartbeat);
@@ -123,11 +139,14 @@ router.post('/stream', (req, res) => {
 // ── Sync (poll + ack) ─────────────────────────────────────────────────────
 
 router.post('/sync', (req, res) => {
-  const { subscriptionId, lastSequenceNumber } = req.body || {};
+  const { clientId, subscriptionId, lastSequenceNumber } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!subscriptionId) {
     return sendError(res, 400, 'Validation error', '"subscriptionId" is required');
   }
-  const updates = manager.syncUpdates(subscriptionId, lastSequenceNumber);
+  const updates = manager.syncUpdates(subscriptionId, clientId, lastSequenceNumber);
   if (updates === null) {
     return sendError(res, 404, 'Subscription not found', `id=${subscriptionId}`);
   }
@@ -137,12 +156,15 @@ router.post('/sync', (req, res) => {
 // ── List (bulk) ───────────────────────────────────────────────────────────
 
 router.post('/list', (req, res) => {
-  const { subscriptionIds } = req.body || {};
+  const { clientId, subscriptionIds } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!Array.isArray(subscriptionIds)) {
     return sendError(res, 400, 'Validation error', '"subscriptionIds" array is required');
   }
   const items = subscriptionIds.map(subId => {
-    const sub = manager.getSubscription(subId);
+    const sub = manager.getSubscription(subId, clientId);
     if (sub) return bulkItem({ subscriptionId: subId, result: manager.serializeDetail(sub) });
     return bulkItem({
       subscriptionId: subId,
@@ -155,12 +177,15 @@ router.post('/list', (req, res) => {
 // ── Delete (bulk) ─────────────────────────────────────────────────────────
 
 router.post('/delete', (req, res) => {
-  const { subscriptionIds } = req.body || {};
+  const { clientId, subscriptionIds } = req.body || {};
+  if (!isNonEmptyString(clientId)) {
+    return sendError(res, 400, 'Validation error', '"clientId" is required');
+  }
   if (!Array.isArray(subscriptionIds)) {
     return sendError(res, 400, 'Validation error', '"subscriptionIds" array is required');
   }
   const items = subscriptionIds.map(subId => {
-    const ok = manager.deleteSubscription(subId, monitor);
+    const ok = manager.deleteSubscription(subId, clientId, monitor);
     if (ok) return bulkItem({ subscriptionId: subId });
     return bulkItem({
       subscriptionId: subId,

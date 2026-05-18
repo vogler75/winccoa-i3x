@@ -4,7 +4,7 @@
  * i3X v1 response-envelope helpers.
  *
  * Single:  { success: true,  result: <T> }
- * Bulk:    { success: true,  results: [ { success, elementId|subscriptionId, result, error } ] }
+ * Bulk:    { success: <all items succeeded>, results: [ { success, elementId|subscriptionId, result|error } ] }
  * Error:   { success: false, error: { code, message } }
  */
 
@@ -13,14 +13,14 @@ function success(result) {
 }
 
 function bulk(results) {
-  return { success: true, results };
+  return { success: results.every(item => item && item.success === true), results };
 }
 
 function bulkItem({ elementId, subscriptionId, result, error }) {
   const item = { success: !error };
   if (elementId !== undefined) item.elementId = elementId;
   if (subscriptionId !== undefined) item.subscriptionId = subscriptionId;
-  if (result !== undefined) item.result = result;
+  if (!error) item.result = result === undefined ? null : result;
   if (error !== undefined) item.error = error;
   return item;
 }

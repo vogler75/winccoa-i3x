@@ -3,7 +3,7 @@
 /**
  * Map WinCC OA quality indicators to i3X quality strings.
  *
- * i3X quality values: "Good", "Bad", "GoodNoData", "NotConnected", "Stale", "Uncertain"
+ * i3X v1 quality values: "Good", "GoodNoData", "Bad", "Uncertain"
  */
 
 /**

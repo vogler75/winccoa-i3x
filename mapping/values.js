@@ -25,7 +25,8 @@ async function getDpeValues(dpeNames) {
     // err 19 = attribute does not exist (queried config on a struct node)
     if (exc && exc.code === 19) {
       console.warn('dpGet VQT: attribute does not exist —', exc.dpe || allKeys[0]);
-      return dpeNames.map(() => ({ value: null, quality: 'Bad', timestamp: null }));
+      const timestamp = new Date().toISOString();
+      return dpeNames.map(() => ({ value: null, quality: 'Bad', timestamp }));
     }
     console.error('dpGet VQT failed:', exc);
     throw exc;
@@ -41,6 +42,7 @@ async function getDpeValues(dpeNames) {
     let timestamp = null;
     if (stime instanceof Date) timestamp = stime.toISOString();
     else if (stime !== null && stime !== undefined) timestamp = new Date(stime).toISOString();
+    if (!timestamp) timestamp = new Date().toISOString();
 
     const noValue = value === null || value === undefined;
     out.push({

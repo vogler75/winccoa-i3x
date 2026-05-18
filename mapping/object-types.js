@@ -1,7 +1,7 @@
 'use strict';
 
 const { WinccoaManager } = require('winccoa-manager');
-const { typeNameToUri } = require('./namespaces');
+const { typeNameToUri, BASE_NAMESPACE_URI } = require('./namespaces');
 const { dpTypeNodeToSchema, elemTypeToSchema, ET } = require('../utils/json-schema');
 
 const winccoa = new WinccoaManager();
@@ -13,8 +13,6 @@ const winccoa = new WinccoaManager();
 function resolveTyperef(refName) {
   try { return winccoa.dpTypeGet(refName, true); } catch (_e) { return null; }
 }
-
-const BASE_TYPE_NS = 'http://i3x.dev/base';
 
 /**
  * Synthetic, built-in ObjectTypes. These back the `typeElementId` references
@@ -28,14 +26,14 @@ function buildSyntheticTypes() {
     {
       elementId: 'FolderType',
       displayName: 'FolderType',
-      namespaceUri: BASE_TYPE_NS,
+      namespaceUri: BASE_NAMESPACE_URI,
       sourceTypeId: 'FolderType',
       schema: { type: 'object', properties: {} },
     },
     {
       elementId: 'object',
       displayName: 'object',
-      namespaceUri: BASE_TYPE_NS,
+      namespaceUri: BASE_NAMESPACE_URI,
       sourceTypeId: 'object',
       schema: { type: 'object', additionalProperties: true },
     },
@@ -45,7 +43,7 @@ function buildSyntheticTypes() {
     types.push({
       elementId: name,
       displayName: name,
-      namespaceUri: BASE_TYPE_NS,
+      namespaceUri: BASE_NAMESPACE_URI,
       sourceTypeId: name,
       schema: elemTypeToSchema(et),
     });

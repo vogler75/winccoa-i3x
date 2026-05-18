@@ -8,7 +8,7 @@ The server runs as a WinCC OA JavaScript Manager and uses Express.js for HTTP ro
 
 ## What It Provides
 
-- i3X namespace discovery for the current WinCC OA system
+- i3X namespace discovery for the current WinCC OA system and built-in i3X base types
 - i3X object type discovery from WinCC OA datapoint types
 - i3X object instance discovery from CNS hierarchy views, with a datapoint-enumeration fallback
 - Current value reads and writes for leaf datapoint elements
@@ -95,14 +95,14 @@ Notes:
 - `auth.enabled: true` validates Basic Auth credentials with WinCC OA users.
 - `cns.hierarchyViews` controls which CNS views are used to build object instances.
 - If no configured CNS hierarchy view is readable, the server falls back to enumerating datapoints by type.
-- `namespaceView` is present for compatibility/configuration, but the current namespace mapping returns one namespace for the current WinCC OA system.
+- `namespaceView` is present for compatibility/configuration; namespace mapping currently returns the WinCC OA system namespace and the built-in i3X base namespace.
 
 ## Data Mapping
 
 Namespaces:
 
-- `GET /namespaces` returns a single namespace for the current WinCC OA system.
-- The URI format is `http://winccoa.local/<systemName>`.
+- `GET /namespaces` returns the current WinCC OA system namespace and `http://i3x.dev/base`.
+- The WinCC OA URI format is `http://winccoa.local/<systemName>`.
 
 Object types:
 
@@ -131,7 +131,7 @@ Values:
 Every response follows one of three shapes (i3X v1):
 
 - Single result: `{ "success": true, "result": <value> }`
-- Bulk result:   `{ "success": true, "results": [ { "success": true, "elementId": "…", "result": <value>, "error": null }, … ] }`
+- Bulk result:   `{ "success": false, "results": [ { "success": true, "elementId": "…", "result": <value> }, { "success": false, "elementId": "…", "error": { ... } } ] }`
 - Error:         `{ "success": false, "error": { "code": <http-status>, "message": "…" } }`
 
 ## API Endpoints
@@ -151,15 +151,15 @@ All paths below are relative to `/i3x/v1`.
 | `POST` | `/objects/list` | Bulk fetch objects by `elementIds` |
 | `POST` | `/objects/related` | Query parent/child/component relationships |
 | `POST` | `/objects/value` | Bulk read current values |
-| `PUT`  | `/objects/:elementId/value` | Write one current value (body is the raw JSON value) |
+| `PUT`  | `/objects/:elementId/value` | Write one current value (body is VQT-shaped `{ "value": ... }`) |
 | `POST` | `/objects/history` | Bulk read historical values |
 | `GET`  | `/objects/:elementId/history` | Read history for one element |
 | `PUT`  | `/objects/:elementId/history` | Write historical values |
 | `POST` | `/subscriptions` | Create subscription |
 | `POST` | `/subscriptions/register` | Register monitored element IDs on a subscription |
 | `POST` | `/subscriptions/unregister` | Unregister monitored element IDs |
-| `POST` | `/subscriptions/stream` | Open SSE stream (POST carries `{subscriptionId}`) |
-| `POST` | `/subscriptions/sync` | Poll queued updates; body `{subscriptionId, lastSequenceNumber?}` |
+| `POST` | `/subscriptions/stream` | Open SSE stream (POST carries `{clientId, subscriptionId}`) |
+| `POST` | `/subscriptions/sync` | Poll queued updates; body `{clientId, subscriptionId, lastSequenceNumber?}` |
 | `POST` | `/subscriptions/list` | Bulk fetch subscription details |
 | `POST` | `/subscriptions/delete` | Bulk delete subscriptions |
 
@@ -183,13 +183,13 @@ curl -X POST http://localhost:8080/i3x/v1/objects/value \
   -d '{"elementIds":["Plant1/Area1/Motor1/speed"],"maxDepth":1}'
 ```
 
-Write a current value. The request body is the raw JSON value itself, and slash-containing element IDs must be URL-encoded:
+Write a current value. The request body is VQT-shaped, and slash-containing element IDs must be URL-encoded:
 
 ```bash
 curl -X PUT http://localhost:8080/i3x/v1/objects/Plant1%2FArea1%2FMotor1%2Fspeed/value \
   -u admin:password \
   -H 'Content-Type: application/json' \
-  -d '42'
+  -d '{"value":42,"quality":"Good"}'
 ```
 
 Read history:
@@ -210,16 +210,17 @@ Create, register, and stream a subscription:
 
 ```bash
 SUB=$(curl -s -X POST http://localhost:8080/i3x/v1/subscriptions \
-  -u admin:password -H 'Content-Type: application/json' -d '{}' \
+  -u admin:password -H 'Content-Type: application/json' \
+  -d '{"clientId":"curl-demo","displayName":"curl stream"}' \
   | jq -r '.result.subscriptionId')
 
 curl -X POST http://localhost:8080/i3x/v1/subscriptions/register \
   -u admin:password -H 'Content-Type: application/json' \
-  -d "{\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
+  -d "{\"clientId\":\"curl-demo\",\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
 
 curl -N -X POST http://localhost:8080/i3x/v1/subscriptions/stream \
   -u admin:password -H 'Content-Type: application/json' \
-  -d "{\"subscriptionId\":\"$SUB\"}"
+  -d "{\"clientId\":\"curl-demo\",\"subscriptionId\":\"$SUB\"}"
 ```
 
 Poll with sequence-number ack instead of streaming:
@@ -227,7 +228,7 @@ Poll with sequence-number ack instead of streaming:
 ```bash
 curl -X POST http://localhost:8080/i3x/v1/subscriptions/sync \
   -u admin:password -H 'Content-Type: application/json' \
-  -d "{\"subscriptionId\":\"$SUB\",\"lastSequenceNumber\":0}"
+  -d "{\"clientId\":\"curl-demo\",\"subscriptionId\":\"$SUB\",\"lastSequenceNumber\":0}"
 ```
 
 ## Project Structure

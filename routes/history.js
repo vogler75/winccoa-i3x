@@ -25,8 +25,9 @@ const router = express.Router();
  *  - Struct DP / struct sub-path     → N targets (one per leaf DPE), each
  *                                      keyed by the leaf's full DPE-path
  *                                      elementId (synthetic: `${eid}/${relPath}`)
- *  - Composition folder              → per-child expansion at maxDepth > 1,
+ *  - Composition object              → per-component expansion at maxDepth > 1,
  *                                      else one composition marker
+ *  - Folder/non-value object         → one empty-history result
  *  - Unknown id                      → null
  */
 async function expandHistoryTargets(eid, maxDepth) {
@@ -37,8 +38,11 @@ async function expandHistoryTargets(eid, maxDepth) {
     if (leaves.length === 1 && leaves[0].relPath === '') {
       return [{ elementId: eid, dpe: leaves[0].dpe, isComposition: false }];
     }
+    if (maxDepth === 1) {
+      return [{ elementId: eid, dpe: null, isComposition: true }];
+    }
     // Struct: emit one target per leaf, keyed by a synthetic id for the
-    // bulk response so the caller can distinguish them.
+    // caller can distinguish them inside the parent result's components map.
     return leaves.map(l => ({
       elementId: `${eid}/${l.relPath.replace(/\./g, '/')}`,
       dpe: l.dpe,
@@ -49,6 +53,9 @@ async function expandHistoryTargets(eid, maxDepth) {
   // Not a DP/DPE entity — must be a folder or unknown.
   const [rec] = await getObjectInstancesByIds([eid]);
   if (!rec) return null;
+  if (!rec.isComposition) {
+    return [{ elementId: eid, dpe: null, isComposition: false }];
+  }
 
   if (maxDepth === 1) {
     return [{ elementId: eid, dpe: null, isComposition: true }];
@@ -57,7 +64,7 @@ async function expandHistoryTargets(eid, maxDepth) {
   const childDepth = maxDepth === 0 ? 0 : maxDepth - 1;
   const children = await buildObjectInstanceList({ parentId: eid });
   const out = [];
-  for (const child of children) {
+  for (const child of children.filter(c => c.parentRelationship === 'HasComponent')) {
     const sub = await expandHistoryTargets(child.elementId, childDepth);
     if (sub) out.push(...sub);
   }
@@ -85,26 +92,36 @@ router.post('/history', async (req, res) => {
         }));
         continue;
       }
-      for (const t of targets) {
-        if (t.isComposition) {
+      try {
+        if (targets.length === 1 && !targets[0].dpe) {
           items.push(bulkItem({
-            elementId: t.elementId,
-            result: { isComposition: true, values: [] },
+            elementId: eid,
+            result: { isComposition: targets[0].isComposition, values: [] },
           }));
-          continue;
-        }
-        try {
-          const values = await getDpeHistory(t.dpe, startTime, endTime, maxValues);
+        } else if (targets.length === 1) {
+          const values = await getDpeHistory(targets[0].dpe, startTime, endTime, maxValues);
           items.push(bulkItem({
-            elementId: t.elementId,
+            elementId: eid,
             result: { isComposition: false, values },
           }));
-        } catch (exc) {
+        } else {
+          const components = {};
+          for (const t of targets) {
+            components[t.elementId] = {
+              isComposition: false,
+              values: await getDpeHistory(t.dpe, startTime, endTime, maxValues),
+            };
+          }
           items.push(bulkItem({
-            elementId: t.elementId,
-            error: { code: 500, message: String(exc) },
+            elementId: eid,
+            result: { isComposition: true, values: [], components },
           }));
         }
+      } catch (exc) {
+        items.push(bulkItem({
+          elementId: eid,
+          error: { code: 500, message: String(exc) },
+        }));
       }
     }
     sendBulk(res, items);

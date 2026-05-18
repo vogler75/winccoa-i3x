@@ -25,7 +25,7 @@ function createSubscription({ clientId, displayName } = {}) {
   const id = randomUUID();
   _subscriptions.set(id, {
     id,
-    clientId: clientId || null,
+    clientId,
     displayName: displayName || null,
     created: new Date(),
     monitoredItems: new Map(),
@@ -36,12 +36,15 @@ function createSubscription({ clientId, displayName } = {}) {
   return id;
 }
 
-function getSubscription(id) {
-  return _subscriptions.get(id) || null;
+function getSubscription(id, clientId) {
+  const sub = _subscriptions.get(id);
+  if (!sub) return null;
+  if (clientId !== undefined && sub.clientId !== clientId) return null;
+  return sub;
 }
 
-function deleteSubscription(id, monitor) {
-  const sub = _subscriptions.get(id);
+function deleteSubscription(id, clientId, monitor) {
+  const sub = getSubscription(id, clientId);
   if (!sub) return false;
   for (const [, item] of sub.monitoredItems) {
     monitor.disconnect(item.connectId);
@@ -80,7 +83,7 @@ function pushUpdate(id, elementId, vqt) {
     sub.updateQueue.splice(0, sub.updateQueue.length - MAX_QUEUE_SIZE);
   }
 
-  const payload = `data: ${JSON.stringify(update)}\n\n`;
+  const payload = `data: ${JSON.stringify([update])}\n\n`;
   for (const res of sub.sseClients) {
     try {
       res.write(payload);
@@ -97,11 +100,12 @@ function pushUpdate(id, elementId, vqt) {
  *  - Returns the remaining updates, ordered by sequenceNumber.
  *
  * @param {string} id
+ * @param {string} clientId
  * @param {number|null|undefined} lastSequenceNumber
  * @returns {SyncUpdate[] | null}   null if the subscription does not exist
  */
-function syncUpdates(id, lastSequenceNumber) {
-  const sub = _subscriptions.get(id);
+function syncUpdates(id, clientId, lastSequenceNumber) {
+  const sub = getSubscription(id, clientId);
   if (!sub) return null;
   if (typeof lastSequenceNumber === 'number') {
     const keepFrom = sub.updateQueue.findIndex(u => u.sequenceNumber > lastSequenceNumber);
@@ -114,10 +118,17 @@ function syncUpdates(id, lastSequenceNumber) {
   return sub.updateQueue.slice();
 }
 
-function addSseClient(id, res) {
-  const sub = _subscriptions.get(id);
+function addSseClient(id, clientId, res) {
+  const sub = getSubscription(id, clientId);
   if (!sub) return false;
+  for (const existing of sub.sseClients) {
+    try { existing.end(); } catch (_e) { /* ignore */ }
+  }
+  sub.sseClients.clear();
   sub.sseClients.add(res);
+  if (sub.updateQueue.length > 0) {
+    res.write(`data: ${JSON.stringify(sub.updateQueue)}\n\n`);
+  }
   return true;
 }
 

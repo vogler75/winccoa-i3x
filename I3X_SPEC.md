@@ -18,7 +18,7 @@ All normal endpoint responses use one of these shapes:
 
 ```json
 {
-  "success": true,
+  "success": false,
   "results": [
     { "success": true, "elementId": "Plant1/Area1/Motor1", "result": {} },
     { "success": false, "elementId": "missing", "error": { "code": 404, "message": "Object not found" } }
@@ -62,7 +62,7 @@ version and optional capabilities.
 
 | i3X concept | v1 meaning | WinCC OA mapping |
 | --- | --- | --- |
-| Namespace | Logical grouping for ObjectTypes and RelationshipTypes | One system-level namespace for the WinCC OA system |
+| Namespace | Logical grouping for ObjectTypes and RelationshipTypes | WinCC OA system namespace plus i3X base namespace for built-ins |
 | ObjectType | JSON Schema describing an Object value | WinCC OA DP type from `dpTypes()` / `dpTypeGet()` |
 | Object | Instance with readable/writable value | CNS node linked to a DP/DPE, or a folder node |
 | RelationshipType | Bidirectional edge type | Built-in hierarchy and composition relationships |
@@ -85,13 +85,15 @@ Element IDs are bare strings, not `obj:`, `type:`, or `rel:` prefixed IDs.
 A Namespace groups type definitions. In v1, Object instances do not directly
 belong to a namespace; their type provenance is exposed on the Object metadata.
 
-The current implementation returns one namespace for the WinCC OA system:
+The current implementation returns the WinCC OA system namespace plus the i3X
+base namespace used by synthetic object types and built-in relationship types:
 
 ```json
 {
   "success": true,
   "result": [
-    { "uri": "http://winccoa.local/System1", "displayName": "System1" }
+    { "uri": "http://winccoa.local/System1", "displayName": "System1" },
+    { "uri": "http://i3x.dev/base", "displayName": "i3X Base" }
   ]
 }
 ```
@@ -100,6 +102,7 @@ WinCC OA mapping:
 
 - Source: `winccoa.getSystemName()`
 - URI: `http://winccoa.local/<systemName>`
+- Base URI: `http://i3x.dev/base`
 - `I3X_Namespaces` is currently not used for namespace discovery
 - `config.cns.namespaceView` remains a configuration placeholder
 
@@ -388,10 +391,13 @@ WinCC OA current-value mapping:
 - Invalid flag source: `_online.._invalid`
 - Primitive leaf ObjectInstance → scalar VQT
 - Scalar DP root uses a trailing-dot DPE address, e.g. `ExampleDP.`
-- Composition ObjectInstance (struct / folder / DP struct-root) →
+- Composition ObjectInstance (struct / DP struct-root) →
   `value: null, quality: "GoodNoData"`. When `maxDepth > 1`, `components`
-  is populated with the immediate child ObjectInstances' VQTs, keyed by
+  is populated with the immediate component ObjectInstances' VQTs, keyed by
   child elementId. Clients drill further by passing a child's elementId.
+- Folder ObjectInstances are organizational nodes, not compositions. They
+  return `value: null, quality: "GoodNoData"` and do not recurse through
+  `HasChildren` in value reads.
 
 ### `POST /objects/value`
 
@@ -441,19 +447,22 @@ For a primitive leaf the result is just `{ isComposition: false, value, quality,
 
 ### `PUT /objects/{elementId}/value`
 
-Writes a current value. The current implementation accepts the raw JSON value
-as the request body:
+Writes a current value. The v1 request body is VQT-shaped; `quality` and
+`timestamp` are accepted for client compatibility, but WinCC OA current writes
+only write the `value` through `dpSetWait`:
 
 ```json
-42
+{
+  "value": 42,
+  "quality": "Good",
+  "timestamp": "2026-04-24T10:30:00.000Z"
+}
 ```
 
 Only Objects that resolve to exactly one primitive DPE are writable. Struct
 roots and folders are not writable as a whole.
 
-Spec note: the v1 guide describes a VQT request body with `value`, optional
-`quality`, and optional `timestamp`. This project currently writes the raw value
-and ignores client-supplied quality/timestamp for current writes.
+Legacy raw JSON values are still accepted when the body has no `value` key.
 
 ---
 
@@ -526,7 +535,8 @@ Subscriptions are in memory and are lost when the JavaScript Manager restarts.
 They monitor WinCC OA values with `dpConnect`.
 
 The v1 spec requires `clientId` to scope subscriptions. This implementation
-accepts and returns `clientId`, but currently does not require it.
+requires it on every subscription request and only allows the owning client to
+access a subscription.
 
 ### `POST /subscriptions`
 
@@ -589,16 +599,18 @@ Opens a Server-Sent Events stream:
 }
 ```
 
-SSE update payloads are VQT-like updates:
+SSE update payloads are arrays of VQT-like updates:
 
 ```json
-{
-  "sequenceNumber": 1,
-  "elementId": "Plant1/Area1/Motor1/speed",
-  "value": 1500,
-  "quality": "Good",
-  "timestamp": "2026-04-24T10:30:00.000Z"
-}
+[
+  {
+    "sequenceNumber": 1,
+    "elementId": "Plant1/Area1/Motor1/speed",
+    "value": 1500,
+    "quality": "Good",
+    "timestamp": "2026-04-24T10:30:00.000Z"
+  }
+]
 ```
 
 ### `POST /subscriptions/sync`
@@ -655,7 +667,5 @@ Bulk delete subscriptions:
 
 Current v1 alignment gaps to track:
 
-- Bulk envelopes currently use top-level `success: true` even when an item in
-  `results` failed.
-- Subscription `clientId` is accepted and returned but not required or enforced.
-- Current-value writes accept a raw JSON value instead of the v1 VQT body.
+- HTTPS/TLS and gzip compression are deployment concerns and are not configured
+  directly in this Express manager.

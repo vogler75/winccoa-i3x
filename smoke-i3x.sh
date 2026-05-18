@@ -36,12 +36,17 @@ hit() {
 
 expect_success() {
   # expect_success <body>
+  expect_success_value "$1" "true"
+}
+
+expect_success_value() {
+  # expect_success_value <body> <true|false>
   local ok
   ok=$(echo "$1" | "$JQ" -r '.success // false')
-  if [ "$ok" = "true" ]; then
-    echo "  ✓ success: true"; pass=$((pass+1))
+  if [ "$ok" = "$2" ]; then
+    echo "  ✓ success: $2"; pass=$((pass+1))
   else
-    echo "  ✗ success != true"; fail=$((fail+1))
+    echo "  ✗ success != $2"; fail=$((fail+1))
   fi
 }
 
@@ -62,7 +67,7 @@ first_type=$(echo "$body" | "$JQ" -r '.result[0].elementId // empty')
 if [ -n "$first_type" ]; then
   body=$(hit "POST /objecttypes/query" -u "$AUTH" -H 'Content-Type: application/json' \
     -d "{\"elementIds\":[\"$first_type\",\"__missing__\"]}" "$BASE/objecttypes/query")
-  expect_success "$body"
+  expect_success_value "$body" "false"
 fi
 
 # ── 4. /relationshiptypes + /relationshiptypes/query ──────────────────────
@@ -70,7 +75,7 @@ body=$(hit "GET /relationshiptypes" -u "$AUTH" "$BASE/relationshiptypes")
 expect_success "$body"
 body=$(hit "POST /relationshiptypes/query" -u "$AUTH" -H 'Content-Type: application/json' \
   -d '{"elementIds":["HasParent","__missing__"]}' "$BASE/relationshiptypes/query")
-expect_success "$body"
+expect_success_value "$body" "false"
 
 # ── 5. /objects ───────────────────────────────────────────────────────────
 body=$(hit "GET /objects" -u "$AUTH" "$BASE/objects")
@@ -89,29 +94,30 @@ if [ -n "$first_obj" ]; then
 fi
 
 # ── 6. /subscriptions flow ────────────────────────────────────────────────
+CLIENT_ID="smoke-client"
 body=$(hit "POST /subscriptions (create)" -u "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"displayName":"smoke"}' "$BASE/subscriptions")
+  -d "{\"clientId\":\"$CLIENT_ID\",\"displayName\":\"smoke\"}" "$BASE/subscriptions")
 expect_success "$body"
 SUB=$(echo "$body" | "$JQ" -r '.result.subscriptionId')
 echo "  subscriptionId: $SUB"
 
 if [ -n "$first_obj" ] && [ -n "$SUB" ]; then
   body=$(hit "POST /subscriptions/register" -u "$AUTH" -H 'Content-Type: application/json' \
-    -d "{\"subscriptionId\":\"$SUB\",\"elementIds\":[\"$first_obj\"],\"maxDepth\":2}" \
+    -d "{\"clientId\":\"$CLIENT_ID\",\"subscriptionId\":\"$SUB\",\"elementIds\":[\"$first_obj\"],\"maxDepth\":2}" \
     "$BASE/subscriptions/register")
   expect_success "$body"
 fi
 
 body=$(hit "POST /subscriptions/list" -u "$AUTH" -H 'Content-Type: application/json' \
-  -d "{\"subscriptionIds\":[\"$SUB\",\"no-such-sub\"]}" "$BASE/subscriptions/list")
-expect_success "$body"
+  -d "{\"clientId\":\"$CLIENT_ID\",\"subscriptionIds\":[\"$SUB\",\"no-such-sub\"]}" "$BASE/subscriptions/list")
+expect_success_value "$body" "false"
 
 body=$(hit "POST /subscriptions/sync" -u "$AUTH" -H 'Content-Type: application/json' \
-  -d "{\"subscriptionId\":\"$SUB\",\"lastSequenceNumber\":0}" "$BASE/subscriptions/sync")
+  -d "{\"clientId\":\"$CLIENT_ID\",\"subscriptionId\":\"$SUB\",\"lastSequenceNumber\":0}" "$BASE/subscriptions/sync")
 expect_success "$body"
 
 body=$(hit "POST /subscriptions/delete" -u "$AUTH" -H 'Content-Type: application/json' \
-  -d "{\"subscriptionIds\":[\"$SUB\"]}" "$BASE/subscriptions/delete")
+  -d "{\"clientId\":\"$CLIENT_ID\",\"subscriptionIds\":[\"$SUB\"]}" "$BASE/subscriptions/delete")
 expect_success "$body"
 
 echo

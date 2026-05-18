@@ -3,9 +3,10 @@
 const { WinccoaManager } = require('winccoa-manager');
 
 const winccoa = new WinccoaManager();
+const BASE_NAMESPACE_URI = 'http://i3x.dev/base';
 
 // Cached system-level namespace URI — computed once at startup.
-// All DP types share a single namespace per WinCC OA system.
+// WinCC OA DP types share this namespace; synthetic i3X built-ins use BASE_NAMESPACE_URI.
 let _systemUri = null;
 
 /**
@@ -23,7 +24,7 @@ function getSystemUri() {
 
 /**
  * Build the list of i3X Namespace objects.
- * Returns a single namespace for the WinCC OA system (all types share it).
+ * Returns the WinCC OA system namespace plus the base namespace for built-ins.
  *
  * @returns {Array<{uri: string, displayName: string}>}
  */
@@ -31,12 +32,15 @@ async function buildNamespaceList() {
   const uri = getSystemUri();
   // Extract system name from URI for displayName
   const systemName = uri.replace('http://winccoa.local/', '');
-  return [{ uri, displayName: systemName }];
+  return [
+    { uri, displayName: systemName },
+    { uri: BASE_NAMESPACE_URI, displayName: 'i3X Base' },
+  ];
 }
 
 /**
- * Return the namespace URI for any DP type name.
- * All types belong to the single system-level namespace.
+ * Return the namespace URI for any WinCC OA DP type name.
+ * Synthetic built-in types use BASE_NAMESPACE_URI in their own mapper.
  * @param {string} _typeName  (unused — kept for API compatibility)
  * @returns {string}
  */
@@ -44,4 +48,4 @@ function typeNameToUri(_typeName) {
   return getSystemUri();
 }
 
-module.exports = { buildNamespaceList, typeNameToUri, getSystemUri };
+module.exports = { buildNamespaceList, typeNameToUri, getSystemUri, BASE_NAMESPACE_URI };

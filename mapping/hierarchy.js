@@ -6,6 +6,8 @@ const { typeNameToUri, getSystemUri } = require('./namespaces');
 const { ET, elemTypeName } = require('../utils/json-schema');
 
 const winccoa = new WinccoaManager();
+const PARENT_REL_HAS_CHILDREN = 'HasChildren';
+const PARENT_REL_HAS_COMPONENT = 'HasComponent';
 
 /**
  * Internal cache — rebuilt on demand and invalidated on sysConnect/CNS events.
@@ -15,7 +17,7 @@ const winccoa = new WinccoaManager();
  *   typeNodes:  Map<typeName, WinccoaDpTypeNode>— memoised dpTypeGet results
  *
  * The object graph mirrors WinCC OA's natural shape (OPC UA-style):
- *   - CNS folder                     → isComposition=true, typeElementId=FolderType
+ *   - CNS folder                     → isComposition=false, typeElementId=FolderType
  *   - DP root (struct)               → isComposition=true, typeElementId=<DpType>
  *   - DP root (primitive/scalar)     → isComposition=false, typeElementId=<DpType>
  *   - Struct sub-node (inline)       → isComposition=true, typeElementId='object'
@@ -72,11 +74,19 @@ async function getRelatedObjects(elementIds, relationshipType) {
         const parent = cache.instances.find(o => o.elementId === self.parentId);
         if (parent) matches.push(parent);
       }
-    } else if (relationshipType === 'HasChildren' || relationshipType === 'HasComponent') {
-      matches = cache.instances.filter(o => o.parentId === eid);
-    } else if (relationshipType === 'HasParent' || relationshipType === 'ComponentOf') {
+    } else if (relationshipType === 'HasChildren') {
+      matches = cache.instances.filter(o => o.parentId === eid && o.parentRelationship === PARENT_REL_HAS_CHILDREN);
+    } else if (relationshipType === 'HasComponent') {
+      matches = cache.instances.filter(o => o.parentId === eid && o.parentRelationship === PARENT_REL_HAS_COMPONENT);
+    } else if (relationshipType === 'HasParent') {
       const self = cache.instances.find(o => o.elementId === eid);
-      if (self && self.parentId) {
+      if (self && self.parentId && self.parentRelationship === PARENT_REL_HAS_CHILDREN) {
+        const parent = cache.instances.find(o => o.elementId === self.parentId);
+        if (parent) matches = [parent];
+      }
+    } else if (relationshipType === 'ComponentOf') {
+      const self = cache.instances.find(o => o.elementId === eid);
+      if (self && self.parentId && self.parentRelationship === PARENT_REL_HAS_COMPONENT) {
         const parent = cache.instances.find(o => o.elementId === self.parentId);
         if (parent) matches = [parent];
       }
@@ -99,7 +109,7 @@ async function getObjectValueInfo(elementId) {
 
 /**
  * Build a CESMII-style `metadata.relationships` map for an elementId:
- *   { HasParent: "...", HasComponent: ["...", ...] }
+ *   { HasParent: "...", HasChildren: ["..."], HasComponent: ["..."] }
  * Keys are omitted when empty.
  */
 async function getRelationships(elementId) {
@@ -108,12 +118,23 @@ async function getRelationships(elementId) {
   if (!self) return null;
 
   const out = {};
-  if (self.parentId) out.HasParent = self.parentId;
+  if (self.parentId) {
+    if (self.parentRelationship === PARENT_REL_HAS_COMPONENT) {
+      out.ComponentOf = self.parentId;
+    } else {
+      out.HasParent = self.parentId;
+    }
+  }
 
-  const children = cache.instances
-    .filter(o => o.parentId === elementId)
+  const childIds = cache.instances
+    .filter(o => o.parentId === elementId && o.parentRelationship === PARENT_REL_HAS_CHILDREN)
     .map(o => o.elementId);
-  if (children.length > 0) out.HasComponent = children;
+  if (childIds.length > 0) out.HasChildren = childIds;
+
+  const componentIds = cache.instances
+    .filter(o => o.parentId === elementId && o.parentRelationship === PARENT_REL_HAS_COMPONENT)
+    .map(o => o.elementId);
+  if (componentIds.length > 0) out.HasComponent = componentIds;
 
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -234,7 +255,7 @@ function buildInstancesFromDpNames(instances, valueMap, typeNodes) {
  * type tree into sub-ObjectInstances. OPC UA-style: each node — struct or
  * primitive — becomes a browsable entity with its own elementId.
  */
-function addDpInstance(elementId, displayName, parentId, dpName, typeName, instances, valueMap, typeNodes) {
+function addDpInstance(elementId, displayName, parentId, dpName, typeName, instances, valueMap, typeNodes, parentRelationship = null) {
   const typeNode = resolveTypeNode(typeName, typeNodes);
   const rootIsComposite = typeNode && isComposite(typeNode);
   const nsUri = typeNameToUri(typeName);
@@ -244,6 +265,7 @@ function addDpInstance(elementId, displayName, parentId, dpName, typeName, insta
     displayName,
     typeElementId: typeName,
     parentId,
+    parentRelationship: parentId ? parentRelationship : null,
     isComposition: !!rootIsComposite,
     namespaceUri: nsUri,
   });
@@ -288,6 +310,7 @@ function expandTypeChildren(children, parentElemId, rootElemId, dpName, typeName
       displayName: child.name,
       typeElementId,
       parentId: parentElemId,
+      parentRelationship: PARENT_REL_HAS_COMPONENT,
       isComposition: composite,
       namespaceUri: nsUri,
     });
@@ -383,7 +406,7 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
         let typeName = null;
         try { typeName = winccoa.dpTypeName(`${dpName}.`); } catch (_e) {}
         if (typeName && !typeName.startsWith('_')) {
-          addDpInstance(myElemId, nodeName, parentElemId, dpName, typeName, instances, valueMap, typeNodes);
+          addDpInstance(myElemId, nodeName, parentElemId, dpName, typeName, instances, valueMap, typeNodes, PARENT_REL_HAS_CHILDREN);
           pushedEntity = true;
         }
       } else {
@@ -414,6 +437,7 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
             displayName: nodeName,
             typeElementId: subTypeElementId,
             parentId: parentElemId,
+            parentRelationship: parentElemId ? PARENT_REL_HAS_CHILDREN : null,
             isComposition: !!subComposite,
             namespaceUri: nsUri,
           });
@@ -440,7 +464,8 @@ async function traverseCnsNode(fullCnsPath, parentElemId, cnsRelPath, instances,
       displayName: nodeName,
       typeElementId: 'FolderType',
       parentId: parentElemId,
-      isComposition: true,
+      parentRelationship: parentElemId ? PARENT_REL_HAS_CHILDREN : null,
+      isComposition: false,
       namespaceUri: getSystemUri(),
     });
     let children = [];

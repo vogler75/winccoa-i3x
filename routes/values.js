@@ -41,12 +41,22 @@ function findNode(node, segments) {
   return tail.length ? findNode(child, tail) : child;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function extractWriteValue(body) {
+  if (body && typeof body === 'object' && !Array.isArray(body) && hasOwn(body, 'value')) {
+    return body.value;
+  }
+  return body;
+}
+
 /**
  * Build a v1 CurrentValueResult for a single elementId.
  *   - Primitive leaf          → scalar VQT
  *   - Struct sub-node / root  → value=null, components when maxDepth > 1
- *   - Folder                  → value=null, components with child object VQTs
- *                               when maxDepth > 1
+ *   - Folder                  → value=null, quality=GoodNoData
  */
 async function buildCurrentValue(elementId, maxDepth) {
   const [rec] = await getObjectInstancesByIds([elementId]);
@@ -59,7 +69,7 @@ async function buildCurrentValue(elementId, maxDepth) {
   if (!rec.isComposition) {
     const vqt = await readLeafVqt(elementId);
     if (!vqt) {
-      return { isComposition: false, value: null, quality: 'Bad', timestamp: new Date().toISOString() };
+      return { isComposition: false, value: null, quality: 'GoodNoData', timestamp: new Date().toISOString() };
     }
     return { isComposition: false, ...vqt };
   }
@@ -75,7 +85,7 @@ async function buildCurrentValue(elementId, maxDepth) {
     const childDepth = maxDepth === 0 ? 0 : maxDepth - 1;
     const children = await buildObjectInstanceList({ parentId: elementId });
     const components = {};
-    for (const child of children) {
+    for (const child of children.filter(c => c.parentRelationship === 'HasComponent')) {
       try {
         components[child.elementId] = await buildCurrentValue(child.elementId, childDepth);
       } catch (exc) {
@@ -118,13 +128,15 @@ router.post('/value', async (req, res) => {
   }
 });
 
-// PUT /objects/{elementId}/value   Body: raw JSON value
+// PUT /objects/{elementId}/value   Body: VQT { value, quality?, timestamp? }.
+// Legacy raw JSON values are still accepted when the body has no `value` key.
 router.put('/:elementId/value', async (req, res) => {
   const elementId = decodeURIComponent(req.params.elementId);
-  const value = req.body;
-  if (value === undefined) {
+  const body = req.body;
+  if (body === undefined) {
     return sendError(res, 400, 'Validation error', 'request body is required');
   }
+  const value = extractWriteValue(body);
   try {
     const dpe = await elementIdToDpe(elementId);
     if (!dpe) {

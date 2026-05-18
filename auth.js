@@ -18,7 +18,7 @@ async function basicAuth(req, res, next) {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Basic ')) {
     res.set('WWW-Authenticate', 'Basic realm="i3X API"');
-    return res.status(401).json({ error: { code: 401, message: 'Authentication required' } });
+    return res.status(401).json({ success: false, error: { code: 401, message: 'Authentication required' } });
   }
 
   let username, password;
@@ -30,7 +30,7 @@ async function basicAuth(req, res, next) {
     username = decoded.slice(0, colonIdx);
     password = decoded.slice(colonIdx + 1);
   } catch (_err) {
-    return res.status(401).json({ error: { code: 401, message: 'Malformed Authorization header' } });
+    return res.status(401).json({ success: false, error: { code: 401, message: 'Malformed Authorization header' } });
   }
 
   // getUserId returns undefined for unknown users, a number (>= 0) for known users.
@@ -38,7 +38,7 @@ async function basicAuth(req, res, next) {
   const userId = winccoa.getUserId(username);
   if (userId === undefined || userId === null) {
     console.warn(`Auth: login failed — unknown user "${username}" from ${req.ip}`);
-    return res.status(401).json({ error: { code: 401, message: 'Invalid credentials' } });
+    return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid credentials' } });
   }
 
   try {
@@ -47,7 +47,7 @@ async function basicAuth(req, res, next) {
     const ok = password ? winccoa.setUserId(userId, password) : winccoa.setUserId(userId);
     if (!ok) {
       console.warn(`Auth: login failed — wrong password for user "${username}" (id=${userId}) from ${req.ip}`);
-      return res.status(401).json({ error: { code: 401, message: 'Invalid credentials' } });
+      return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid credentials' } });
     }
     console.info(`Auth: login OK — user "${username}" (id=${userId}) from ${req.ip} ${req.method} ${req.path}`);
     req.winccoaUser = { userId, username };
@@ -58,7 +58,7 @@ async function basicAuth(req, res, next) {
     } else {
       console.error(`Auth: unexpected exception for user "${username}" from ${req.ip}:`, exc);
     }
-    return res.status(401).json({ error: { code: 401, message: 'Invalid credentials' } });
+    return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid credentials' } });
   }
 }
 

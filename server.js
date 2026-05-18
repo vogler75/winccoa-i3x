@@ -49,7 +49,7 @@ function createApp() {
 
   // 404 fallback
   app.use((_req, res) => {
-    res.status(404).json({ error: { code: 404, message: 'Not found' } });
+    res.status(404).json({ success: false, error: { code: 404, message: 'Not found' } });
   });
 
   return app;

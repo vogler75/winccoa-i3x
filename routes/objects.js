@@ -111,9 +111,17 @@ router.post('/related', async (req, res) => {
     // sourceRelationship correctly on each RelatedObjectResult.
     const items = [];
     for (const eid of elementIds) {
+      const [sourceRec] = await getObjectInstancesByIds([eid]);
+      if (!sourceRec) {
+        items.push(bulkItem({
+          elementId: eid,
+          error: { code: 404, message: `Object '${eid}' not found` },
+        }));
+        continue;
+      }
       const matches = await getRelatedObjects([eid], relationshipType);
       const related = await Promise.all(matches.map(async rec => ({
-        sourceRelationship: resolveSourceRelationship(eid, rec, relationshipType),
+        sourceRelationship: resolveSourceRelationship(sourceRec, rec, relationshipType),
         object: await serializeInstance(rec, includeMetadata),
       })));
       items.push(bulkItem({ elementId: eid, result: related }));
@@ -130,10 +138,13 @@ router.post('/related', async (req, res) => {
  * through. If the caller specified `relationshipType`, that wins. Otherwise
  * we infer parent-vs-child from the hierarchy records themselves.
  */
-function resolveSourceRelationship(sourceId, rec, relationshipType) {
+function resolveSourceRelationship(sourceRec, rec, relationshipType) {
   if (relationshipType) return relationshipType;
-  if (rec.parentId === sourceId) return 'HasChildren';
-  return 'HasParent';
+  if (rec.parentId === sourceRec.elementId) return rec.parentRelationship || 'HasChildren';
+  if (sourceRec.parentId === rec.elementId) {
+    return sourceRec.parentRelationship === 'HasComponent' ? 'ComponentOf' : 'HasParent';
+  }
+  return 'HasChildren';
 }
 
 module.exports = router;

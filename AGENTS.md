@@ -49,16 +49,17 @@ curl -X POST http://localhost:8080/i3x/v1/objects/value \
 
 # Subscription flow: create, register, stream
 SUB=$(curl -s -X POST http://localhost:8080/i3x/v1/subscriptions \
-  -u admin:password -H "Content-Type: application/json" -d '{}' \
+  -u admin:password -H "Content-Type: application/json" \
+  -d '{"clientId":"curl-demo","displayName":"curl stream"}' \
   | jq -r '.result.subscriptionId')
 
 curl -X POST http://localhost:8080/i3x/v1/subscriptions/register \
   -u admin:password -H "Content-Type: application/json" \
-  -d "{\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
+  -d "{\"clientId\":\"curl-demo\",\"subscriptionId\":\"$SUB\",\"elementIds\":[\"Plant1/Area1/Motor1/speed\"],\"maxDepth\":1}"
 
 curl -N -X POST http://localhost:8080/i3x/v1/subscriptions/stream \
   -u admin:password -H "Content-Type: application/json" \
-  -d "{\"subscriptionId\":\"$SUB\"}"
+  -d "{\"clientId\":\"curl-demo\",\"subscriptionId\":\"$SUB\"}"
 ```
 
 ---
@@ -214,7 +215,7 @@ winccoa.logSevere('message', data);
 ```js
 // Standard error response shape (utils/errors.js):
 function sendError(res, status, message, details) {
-  res.status(status).json({ error: { code: status, message, details } });
+  res.status(status).json({ success: false, error: { code: status, message, details } });
 }
 
 // In routes: catch WinccoaError and map to HTTP
